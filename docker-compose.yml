@@ -1,19 +1,26 @@
-version: '3.8'
+# ==============================================================================
+#   Docker Compose untuk Lingkungan Tes Dashboard Server
+# ==============================================================================
+
+version: "3.8"
 
 services:
   dashboard-test-env:
     build:
       context: .
       dockerfile: Dockerfile
+
     image: debian-dashboard-test:latest
     container_name: dashboard-test-container
-
-    # ... konfigurasi lain seperti ports ...
+    privileged: true
     ports:
       - "8080:80"
 
-    # INI KUNCINYA: Tambahkan baris ini untuk mengaktifkan mode privileged
-    privileged: true
+    # PERUBAHAN DI SINI: Tambahkan 'volumes'
+    # Ini akan me-mount seluruh folder proyek saat ini (.)
+    # ke dalam direktori /home/tester di dalam container.
+    volumes:
+      - .:/home/tester/
 
     stdin_open: true
     tty: true

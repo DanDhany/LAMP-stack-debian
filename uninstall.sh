@@ -7,17 +7,12 @@ confirm_uninstall() {
     clear; echo "======================================================================"
     echo "          Skrip Uninstall untuk Dashboard Server Otomatis"
     echo "======================================================================"; echo ""
-    echo -e "\e[31mPERINGATAN:\e[0m Skrip ini akan MENGHAPUS komponen berikut:"
-    echo "  - Apache2, MariaDB, phpMyAdmin"
-    echo "  - Semua versi PHP dari repositori Sury.org"
-    echo "  - Semua file di /var/www/html"
-    echo "  - Semua database MariaDB (termasuk data di dalamnya)"
-    echo "  - Semua file konfigurasi terkait."; echo ""
-    read -p "Anda yakin ingin melanjutkan? Data tidak akan bisa dikembalikan. [y/N] " -n 1 -r; echo ""
+    echo -e "\e[31mPERINGATAN:\e[0m Skrip ini akan MENGHAPUS semua komponen..."; echo "" # Diringkas
+    read -p "Anda yakin ingin melanjutkan? [y/N] " -n 1 -r; echo ""
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then echo "Proses uninstall dibatalkan."; exit 1; fi
 }
 stop_and_disable_services() {
-    print_info "Menghentikan dan menonaktifkan semua service terkait..."
+    print_info "Menghentikan service..."
     if [ -d /run/systemd/system ]; then
         systemctl stop apache2 mariadb || true; systemctl disable apache2 mariadb || true
     else
@@ -25,24 +20,23 @@ stop_and_disable_services() {
     fi
 }
 purge_packages() {
-    print_info "Menghapus paket-paket utama (purge)..."
-    apt-get purge --auto-remove -y apache2* mariadb-* phpmyadmin
-    print_info "Menghapus semua paket PHP..."; apt-get purge --auto-remove -y "php*" || true
+    print_info "Menghapus paket-paket..."; apt-get purge --auto-remove -y apache2* mariadb-* phpmyadmin "php*" || true
 }
 remove_manual_files() {
-    print_info "Menghapus file repositori dan GPG Key..."; rm -f /etc/apt/sources.list.d/php.list; rm -f /usr/share/keyrings/deb.sury.org-php.gpg
-    print_info "Menghapus file dan direktori kustom lainnya..."
+    print_info "Menghapus file manual..."
+    rm -f /etc/apt/sources.list.d/php.list; rm -f /usr/share/keyrings/deb.sury.org-php.gpg
     rm -f /usr/local/bin/set_php_version.sh; rm -f /etc/sudoers.d/www-data-php-manager
     rm -f /etc/apache2/conf-available/php-per-project.conf
-    print_info "Menghapus semua konten web di /var/www/html..."; rm -rf /var/www/html/*
-    print_info "Menghapus semua data database MariaDB..."; rm -rf /var/lib/mysql
+    rm -rf /var/www/html/*; rm -rf /var/lib/mysql
+    # DIPERBARUI: Hapus juga file lock
+    rm -f /tmp/.dashboard_install_lock
 }
 final_cleanup() {
-    print_info "Membersihkan sisa paket yang tidak dibutuhkan..."; apt-get autoremove -y; apt-get update
+    print_info "Membersihkan sisa paket..."; apt-get autoremove -y; apt-get update
 }
 main() {
-    if [ "$(id -u)" != "0" ]; then print_error "Skrip ini harus dijalankan sebagai root atau dengan sudo."; exit 1; fi
+    if [ "$(id -u)" != "0" ]; then print_error "Skrip harus dijalankan sebagai root."; exit 1; fi
     confirm_uninstall; stop_and_disable_services; purge_packages; remove_manual_files; final_cleanup
-    print_success "Proses uninstall selesai. Server Anda telah dibersihkan."
+    print_success "Proses uninstall selesai."
 }
 main
