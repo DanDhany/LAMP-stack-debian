@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ==============================================================================
-#   Skrip Otomatis Pemasangan Dashboard Server & Manajemen Multi-PHP (Revisi Final)
+#   Skrip Otomatis Pemasangan Dashboard Server & Manajemen Multi-PHP
 # ==============================================================================
-#   DIPERBAIKI: Menangani kode keluar error dari apt-get di lingkungan non-systemd.
+#   DIPERBARUI: Fitur Web SSH (Shell In A Box) dinonaktifkan.
 # ==============================================================================
 
 # Keluar segera jika ada perintah yang gagal
@@ -22,18 +22,11 @@ print_success() { echo -e "\e[32m✅ SUKSES: $1\e[0m"; }
 print_warning() { echo -e "\e[33m⚠️ PERINGATAN: $1\e[0m"; }
 print_error() { echo -e "\e[31m❌ ERROR: $1\e[0m"; }
 
-# FUNGSI BARU untuk instalasi paket yang lebih andal di container
 install_packages() {
     print_info "Menginstal paket: $@"
-    # Buat policy sementara yang selalu mengizinkan service start
     echo -e '#!/bin/sh\nexit 0' > /usr/sbin/policy-rc.d
     chmod +x /usr/sbin/policy-rc.d
-    
-    # DIPERBAIKI: Menambahkan '|| true' untuk mencegah 'set -e' menghentikan skrip
-    # jika apt-get gagal menjalankan service secara otomatis.
     apt-get install -y "$@" || true
-    
-    # Hapus policy sementara setelah selesai
     rm -f /usr/sbin/policy-rc.d
 }
 
@@ -42,11 +35,11 @@ cleanup_on_error() {
     print_error "Instalasi gagal pada salah satu langkah."
     print_info "Memulai proses rollback otomatis..."
     trap - ERR
-    if [ "$USE_SYSTEMD" = "yes" ]; then systemctl stop apache2 mariadb shellinabox || true; else service apache2 stop || true; service mariadb stop || true; service shellinabox stop || true; fi
-    apt-get purge --auto-remove -y apache2* mariadb-* phpmyadmin shellinabox "php*" || true
+    if [ "$USE_SYSTEMD" = "yes" ]; then systemctl stop apache2 mariadb || true; else service apache2 stop || true; service mariadb stop || true; fi
+    apt-get purge --auto-remove -y apache2* mariadb-* phpmyadmin "php*" || true
     rm -f /etc/apt/sources.list.d/php.list; rm -f /usr/share/keyrings/deb.sury.org-php.gpg
     rm -f /usr/local/bin/set_php_version.sh; rm -f /etc/sudoers.d/www-data-php-manager
-    rm -f /etc/apache2/conf-available/php-per-project.conf; rm -f /etc/apache2/conf-available/shellinabox.conf
+    rm -f /etc/apache2/conf-available/php-per-project.conf
     rm -rf /var/www/html/*; rm -rf /var/lib/mysql
     apt-get autoremove -y
     print_error "Rollback Selesai. Sistem telah dikembalikan ke kondisi sebelum instalasi."
@@ -99,10 +92,9 @@ get_setup_choices() {
         read -p "Password user phpMyAdmin [Enter=acak]: " PMA_PASS < /dev/tty
         read -p "Username File Manager [Enter=fm_admin]: " TFM_USER < /dev/tty
         read -sp "Password File Manager [Enter=acak]: " TFM_PASS < /dev/tty; echo ""
-        read -p "Port Web SSH [Enter=4201]: " SIAB_PORT < /dev/tty
     fi
     MARIADB_ROOT_PASS=${MARIADB_ROOT_PASS:-$(generate_random_string)}; PMA_USER=${PMA_USER:-pma_user}; PMA_PASS=${PMA_PASS:-$(generate_random_string)}
-    TFM_USER=${TFM_USER:-fm_admin}; TFM_PASS=${TFM_PASS:-$(generate_random_string)}; SIAB_PORT=${SIAB_PORT:-4201}
+    TFM_USER=${TFM_USER:-fm_admin}; TFM_PASS=${TFM_PASS:-$(generate_random_string)}
 }
 
 phase1_setup_stack() {
@@ -110,11 +102,9 @@ phase1_setup_stack() {
     apt-get update && apt-get upgrade -y
     print_info "Menginstal Apache2, MariaDB, dan paket pendukung..."
     install_packages apache2 mariadb-server mariadb-client curl wget bc
-    
     print_info "Menjalankan dan mengaktifkan service Apache2 & MariaDB..."
     start_service apache2 && enable_service apache2
     start_service mariadb && enable_service mariadb
-
     print_info "Mengamankan instalasi MariaDB..."; mysql -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('$MARIADB_ROOT_PASS');"
     mysql -e "DELETE FROM mysql.user WHERE User='';"; mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
     mysql -e "DROP DATABASE IF EXISTS test;"; mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"; mysql -e "FLUSH PRIVILEGES;"
@@ -138,15 +128,8 @@ phase2_install_multi_php() {
 }
 
 phase3_configure_apache() {
-    print_info "FASE 3: Konfigurasi Apache..."; a2enmod proxy proxy_http proxy_fcgi setenvif actions rewrite proxy_wstunnel; a2enconf phpmyadmin
+    print_info "FASE 3: Konfigurasi Apache..."; a2enmod proxy proxy_http proxy_fcgi setenvif actions rewrite; a2enconf phpmyadmin
     touch /etc/apache2/conf-available/php-per-project.conf; a2enconf php-per-project.conf
-    cat <<EOF > /etc/apache2/conf-available/shellinabox.conf
-<Location /ssh/>
-    ProxyPass http://127.0.0.1:$SIAB_PORT/
-    ProxyPassReverse http://127.0.0.1:$SIAB_PORT/
-</Location>
-EOF
-    a2enconf shellinabox.conf
 }
 
 phase4_install_tools() {
@@ -174,12 +157,7 @@ if [ $? -eq 0 ]; then if [ -d /run/systemd/system ]; then systemctl reload apach
 exit 0
 EOF
     chmod +x /usr/local/bin/set_php_version.sh; echo "www-data ALL=(ALL) NOPASSWD: /usr/local/bin/set_php_version.sh" > /etc/sudoers.d/www-data-php-manager
-    install_packages shellinabox
-    cat <<EOF > /etc/default/shellinabox
-SHELLINABOX_PORT=${SIAB_PORT}
-SHELLINABOX_ARGS="--no-beep --disable-ssl-menu -s /:LOGIN"
-SHELLINABOX_BIND_IP="127.0.0.1"
-EOF
+    
     cd ${WEB_ROOT}; wget -qO tinyfilemanager.php https://raw.githubusercontent.com/prasathmani/tinyfilemanager/master/tinyfilemanager.php
     mkdir -p file-manager; mv tinyfilemanager.php file-manager/index.php
     TFM_PASS_HASH=$(php -r "echo password_hash('$TFM_PASS', PASSWORD_DEFAULT);")
@@ -191,7 +169,7 @@ EOF
 
 phase5_finalize() {
     print_info "FASE 5: Finalisasi..."; mkdir -p ${WEB_ROOT}/config; touch ${WEB_ROOT}/config/project_versions.json
-    chown -R www-data:www-data ${WEB_ROOT}; restart_service apache2; restart_service shellinabox
+    chown -R www-data:www-data ${WEB_ROOT}; restart_service apache2
     apt-get autoremove -y
 }
 
@@ -203,9 +181,6 @@ display_summary() {
     printf "  Berikut adalah detail akses untuk alat bantu lainnya:\n"
     printf "+--------------------------+-------------------------------------------------+\n"
     printf "| \e[1;32m%s\e[0m                 | \e[1;36m%s\e[0m  |\n" "ALAT" "DETAIL"
-    printf "+--------------------------+-------------------------------------------------+\n"
-    printf "| Web SSH (ShellInABox)    | URL: http://%s/ssh/                      |\n" "${IP_ADDRESS}"
-    printf "|                          | Login: Gunakan username & password sistem Linux Anda. |\n"
     printf "+--------------------------+-------------------------------------------------+\n"
     printf "| File Manager             | URL: http://%s/file-manager/             |\n" "${IP_ADDRESS}"
     printf "|                          | Username: %-35s |\n" "${TFM_USER}"; printf "|                          | Password: %-35s |\n" "${TFM_PASS}"
