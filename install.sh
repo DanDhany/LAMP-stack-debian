@@ -14,7 +14,8 @@
 #   - FIX: Error "Conf phpmyadmin does not exist!" dengan menghapus aktivasi alias yang redundan.
 #   - FIX: Error "Can't change dir to '/var/lib/mysql/'" dengan memastikan direktori data MariaDB ada.
 #   - BARU: Penambahan logging otomatis ke file untuk debugging yang lebih mudah.
-#   - BARU: Penambahan dummy project 'test_project_phpinfo' untuk pengujian multi-PHP.
+#   - BARU: Penambahan dua dummy project ('test_project_phpinfo', 'test_project_hello') untuk pengujian multi-PHP.
+#   - FIX: Deteksi error yang lebih granular di fase konfigurasi Apache.
 # ==============================================================================
 
 # Keluar segera jika ada perintah yang gagal
@@ -256,15 +257,23 @@ phase2_install_multi_php() {
 
 phase3_configure_apache() {
     print_info "FASE 3: Konfigurasi Apache..."
+    # Aktifkan modul, tambahkan `|| true` jika sudah aktif tidak masalah
     a2enmod proxy proxy_http proxy_fcgi setenvif actions rewrite || true
 
     local sorted_versions
-    IFS=$'\n' read -d '' -r -a sorted_versions < <(printf "%s\n" "${PHP_VERSIONS_TO_INSTALL[@]}" | sort -Vr)
+    # Urutkan versi dari yang terbaru ke terlama
+    # Pastikan array PHP_VERSIONS_TO_INSTALL tidak kosong sebelum sort
+    if [ ${#PHP_VERSIONS_TO_INSTALL[@]} -eq 0 ]; then
+        print_error "Tidak ada versi PHP yang dipilih untuk instalasi. Tidak dapat mengatur PHP default Apache.";
+        exit 1;
+    fi
+    IFS=$'\n' read -d '' -r -a sorted_versions < <(printf "%s\n" "${PHP_VERSIONS_TO_INSTALL[@]}" | sort -Vr) || { print_error "Gagal mengurutkan versi PHP."; exit 1; }
+    
     local default_php_version=${sorted_versions[0]}
     local default_socket_path="/run/php/php${default_php_version}-fpm.sock"
 
     print_info "Mengatur PHP v${default_php_version} sebagai default untuk Dashboard di ${WEB_ROOT}..."
-    cat <<EOF > /etc/apache2/conf-available/php-per-project.conf
+    cat <<EOF > /etc/apache2/conf-available/php-per-project.conf || { print_error "Gagal membuat php-per-project.conf."; exit 1; }
 # Konfigurasi Default untuk Web Root (Dashboard)
 # Otomatis diatur untuk menggunakan versi PHP terbaru yang diinstal: v${default_php_version}
 <Directory ${WEB_ROOT}>
@@ -277,7 +286,7 @@ EOF
     a2enconf php-per-project.conf || { print_error "Gagal mengaktifkan php-per-project.conf."; exit 1; }
 
     print_info "Memastikan phpMyAdmin menggunakan PHP-FPM v${default_php_version} dengan prioritas tinggi..."
-    cat <<EOF > /etc/apache2/conf-available/phpmyadmin-override.conf
+    cat <<EOF > /etc/apache2/conf-available/phpmyadmin-override.conf || { print_error "Gagal membuat phpmyadmin-override.conf."; exit 1; }
 # Override handler PHP-FPM untuk alias phpMyAdmin
 # Ini memastikan phpMyAdmin menggunakan PHP yang benar (PHP-FPM)
 # Ditempatkan di sini untuk memastikan prioritas yang tepat.
@@ -351,103 +360,109 @@ $message = ''; $message_type = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['project']) && isset($_POST['php_version'])) { $project_to_set = escapeshellarg(trim($_POST['project'])); $version_to_set = escapeshellarg(trim($_POST['php_version'])); $command = "sudo /usr/local/bin/set_php_version.sh {$project_to_set} {$version_to_set} 2>&1"; $output = shell_exec($command); if (strpos(strtolower($output), 'error') === false) { save_project_state(trim($_POST['project']), trim($_POST['php_version'])); $message = "Sukses! $output"; $message_type = 'success'; } else { $message = "Error! $output"; $message_type = 'error'; } }
 $projects = get_projects(); $php_versions = get_installed_php_versions(); $project_states = get_project_states(); $cpu_info = getCpuInfo(); $memory_usage = getMemoryUsage(); $storage_usage = getStorageUsage();
 ?>
-<!DOCTYPE html><html lang="id"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Server & Project Dashboard</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gray-100 text-gray-800 font-sans"><header class="bg-white shadow-md sticky top-0 z-10"><div class="container mx-auto px-6 py-4 flex justify-between items-center"><h1 class="text-2xl font-bold text-gray-800">Server Dashboard</h1><nav class="space-x-4"><a href="/file-manager/" target="_blank" class="text-indigo-600 hover:text-indigo-800 font-semibold">File Manager</a><a href="/phpmyadmin" target="_blank" class="text-indigo-600 hover:text-indigo-800 font-semibold">phpMyAdmin</a></nav></div></header><main class="container mx-auto px-6 py-8"><section id="resource-stats" class="mb-10"><h2 class="text-2xl font-bold text-center text-gray-700 mb-6">Status Sumber Daya Server</h2><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"><div class="bg-white rounded-lg shadow p-5 flex flex-col"><h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center"><svg class="h-6 w-6 text-indigo-500 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V8.25a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 8.25v7.5A2.25 2.25 0 006.75 18z" /></svg>CPU</h3><?php if ($cpu_info): ?><div class="w-full bg-gray-200 rounded-full h-6"><div id="cpu-bar" class="bg-indigo-500 h-6 text-xs font-medium text-indigo-100 text-center p-1 leading-none rounded-full" style="width: <?php echo $cpu_info['percent']; ?>%"><?php echo $cpu_info['percent']; ?>%</div></div><div class="flex justify-between text-sm text-gray-500 mt-2"><span id="cpu-text">Load: <?php echo $cpu_info['load']; ?></span><span>Cores: <?php echo $cpu_info['cores']; ?></span></div><?php else: ?><p class="text-red-500 font-semibold">Tidak Didukung.</p><?php endif; ?></div><div class="bg-white rounded-lg shadow p-5 flex flex-col"><h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center"><svg class="h-6 w-6 text-green-500 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 7.5V6.108c0-1.135.845-2.098 1.976-2.192.373-.03.748-.03 1.125 0 1.131.094 1.976 1.057 1.976 2.192V7.5M8.25 7.5h7.5M8.25 7.5V9a.75.75 0 01-.75.75H5.25A.75.75 0 014.5 9V7.5m8.25 0V9a.75.75 0 00.75.75h2.25a.75.75 0 00.75-.75V7.5M12 10.5h.008v.008H12v-.008zM12 15h.008v.008H12v-.008zm0 2.25h.008v.008H12v-.008zM9.75 15h.008v.008H9.75v-.008zm0 2.25h.008v.008H9.75v-.008zM7.5 15h.008v.008H7.5v-.008zm0 2.25h.008v.008H7.5v-.008zm6.75-4.5h.008v.008h-.008v-.008zm0 2.25h.008v.008h-.008v-.008z" /></svg>RAM</h3><?php if ($memory_usage): ?><div class="w-full bg-gray-200 rounded-full h-6"><div id="ram-bar" class="bg-green-500 h-6 text-xs font-medium text-green-100 text-center p-1 leading-none rounded-full" style="width: <?php echo $memory_usage['percent']; ?>%"><?php echo $memory_usage['percent']; ?>%</div></div><div class="flex justify-between text-sm text-gray-500 mt-2"><span id="ram-text">Digunakan: <?php echo formatBytes($memory_usage['used']); ?></span><span>Total: <?php echo formatBytes($memory_usage['total']); ?></span></div><?php else: ?><p class="text-red-500 font-semibold">Tidak Didukung.</p><?php endif; ?></div><div class="bg-white rounded-lg shadow p-5 flex flex-col"><h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center"><svg class="h-6 w-6 text-sky-500 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" /></svg>Penyimpanan</h3><?php if ($storage_usage): ?><div class="w-full bg-gray-200 rounded-full h-6"><div id="storage-bar" class="bg-sky-500 h-6 text-xs font-medium text-sky-100 text-center p-1 leading-none rounded-full" style="width: <?php echo $storage_usage['percent']; ?>%"><?php echo $storage_usage['percent']; ?>%</div></div><div class="flex justify-between text-sm text-gray-500 mt-2"><span id="storage-text">Digunakan: <?php echo formatBytes($storage_usage['used']); ?></span><span>Total: <?php echo formatBytes($storage_usage['total']); ?></span></div><?php else: ?><p class="text-red-500 font-semibold">Gagal membaca info disk.</p><?php endif; ?></div></div></section><hr class="my-10 border-gray-200"><section id="project-management"><?php if ($message): ?><div class="mb-6 p-4 rounded-md <?php echo $message_type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'; ?>"><?php echo htmlspecialchars($message); ?></div><?php endif; ?><div class="bg-white rounded-lg shadow-lg"><div class="p-6 border-b border-gray-200"><h2 class="text-xl font-semibold">Manajemen Proyek</h2><p class="text-gray-600 mt-1">Atur versi PHP untuk setiap proyek.</p></div><div class="overflow-x-auto"><table class="min-w-full text-left"><thead class="bg-gray-50 border-b border-gray-200"><tr><th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Nama Proyek</th><th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Versi PHP</th><th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Aksi</th></tr></thead><tbody class="divide-y divide-gray-200">
-                <?php if (empty($projects)): ?><tr><td colspan="3" class="px-6 py-12 text-center text-gray-500"><p>Belum ada proyek.</p><p class="text-sm">Buat folder baru di `<?php echo WEB_ROOT; ?>`.</p></td></tr><?php else: ?>
-                <?php foreach ($projects as $project): ?><?php $current_version = $project_states[$project] ?? 'Default'; ?><tr class="hover:bg-gray-50"><td class="px-6 py-4 whitespace-nowrap"><div class="flex items-center"><svg class="h-6 w-6 text-yellow-500 mr-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" /></svg><a href="/<?php echo htmlspecialchars($project); ?>" target="_blank" class="font-medium text-indigo-600 hover:text-indigo-900"><?php echo htmlspecialchars($project); ?></a></div></td><td class="px-6 py-4 whitespace-nowrap"><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full <?php echo $current_version !== 'Default' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'; ?>"><?php echo htmlspecialchars($current_version); ?></span></td><td class="px-6 py-4 whitespace-nowrap text-sm font-medium"><form method="POST" action="index.php" class="flex items-center gap-2"><input type="hidden" name="project" value="<?php echo htmlspecialchars($project); ?>"><select name="php_version" class="block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"><?php foreach ($php_versions as $version): ?><option value="<?php echo $version; ?>" <?php echo ($project_states[$project] ?? '') === $version ? 'selected' : ''; ?>>PHP <?php echo $version; ?></option><?php endforeach; ?></select><button type="submit" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Simpan</button></form></td></tr><?php endforeach; ?><?php endif; ?>
-                </tbody></table></div></div></section></main><footer class="text-center text-gray-500 text-sm py-6 mt-4"><p>Dashboard &copy; <?php echo date("Y"); ?></p></footer><script>
-                    function formatBytesJS(bytes, decimals = 2) {if (!+bytes) return '0 B';const k = 1024;const dm = decimals < 0 ? 0 : decimals;const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];const i = Math.floor(Math.log(bytes) / Math.log(k));return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;}
-                    async function updateStats() {
-                        try {
-                            const response = await fetch('index.php?json=true', { cache: "no-store" });
-                            if (!response.ok) return;
-                            const data = await response.json();
-                            if (data.cpu) {const el = document.getElementById('cpu-bar');if (el) { el.style.width = data.cpu.percent + '%'; el.textContent = data.cpu.percent + '%'; }const txt = document.getElementById('cpu-text');if (txt) txt.textContent = 'Load: ' + data.cpu.load;}
-                            if (data.ram) {const el = document.getElementById('ram-bar');if (el) { el.style.width = data.ram.percent + '%'; el.textContent = data.ram.percent + '%'; }const txt = document.getElementById('ram-text');if (txt) txt.textContent = 'Digunakan: ' + formatBytesJS(data.ram.used);}
-                            if (data.storage) {const el = document.getElementById('storage-bar');if (el) { el.style.width = data.storage.percent + '%'; el.textContent = data.storage.percent + '%'; }const txt = document.getElementById('storage-text');if (txt) txt.textContent = 'Digunakan: ' + formatBytesJS(data.storage.used);}
-                        } catch (error) {console.error('Gagal memperbarui status:', error);}
-                    }
-                    setInterval(updateStats, 2000);
-                </script></body></html>
+<!DOCTYPE html><html lang="id"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Server & Project Dashboard</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gray-100 text-gray-800 font-sans"><header class="bg-white shadow-md sticky top-0 z-10"><div class="container mx-auto px-6 py-4 flex justify-between items-center"><h1 class="text-2xl font-bold text-gray-800">Server Dashboard</h1><nav class="space-x-4"><a href="/file-manager/" target="_blank" class="text-indigo-600 hover:text-indigo-800 font-semibold">File Manager</a><a href="/phpmyadmin" target="_blank" class="text-indigo-600 hover:text-indigo-800 font-semibold">phpMyAdmin</a></nav></div></header><main class="container mx-auto px-6 py-8"><section id="resource-stats" class="mb-10"><h2 class="text-2xl font-bold text-center text-gray-700 mb-6">Status Sumber Daya Server</h2><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"><div class="bg-white rounded-lg shadow p-5 flex flex-col"><h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center"><svg class="h-6 w-6 text-indigo-500 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V8.25a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 8.25v7.5A2.25 2.25 0 006.75 18z" /></svg>CPU</h3><?php if ($cpu_info): ?><div class="w-full bg-gray-200 rounded-full h-6"><div id="cpu-bar" class="bg-indigo-500 h-6 text-xs font-medium text-indigo-100 text-center p-1 leading-none rounded-full" style="width: <?php echo $cpu_info['percent']; ?>%"><?php echo $cpu_info['percent']; ?>%</div></div><div class="flex justify-between text-sm text-gray-500 mt-2"><span id="cpu-text">Load: <?php echo $cpu_info['load']; ?></span><span>Cores: <?php echo $cpu_info['cores']; ?></span></div><?php else: ?><p class="text-red-500 font-semibold">Tidak Didukung.</p><?php endif; ?></div><div class="bg-white rounded-lg shadow p-5 flex flex-col"><h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center"><svg class="h-6 w-6 text-green-500 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 7.5V6.108c0-1.135.845-2.098 1.976-2.192.373-.03.748-.03 1.125 0 1.131.094 1.976 1.057 1.976 2.192V7.5M8.25 7.5h7.5M8.25 7.5V9a.75.75 0 01-.75.75H5.25A.75.75 0 014.5 9V7.5m8.25 0V9a.75.75 0 00.75.75h2.25a.75.75 0 00.75-.75V7.5M12 10.5h.008v.008H12v-.008zM12 15h.008v.008H12v-.008zm0 2.25h.008v.008H12v-.008zM9.75 15h.008v.008H9.75v-.008zm0 2.25h.008v.008H9.75v-.008zM7.5 15h.008v.008H7.5v-.008zm0 2.25h.008v.008H7.5v-.008zm6.75-4.5h.008v.008h-.008v-.008zm0 2.25h.008v.008h-.008v-.008z" /></svg>RAM</h3><?php if ($memory_usage): ?><div class="w-full bg-gray-200 rounded-full h-6"><div id="ram-bar" class="bg-green-500 h-6 text-xs font-medium text-green-100 text-center p-1 leading-none rounded-full" style="width: <?php echo $memory_usage['percent']; ?>%"><?php echo $memory_usage['percent']; ?>%</div></div><div class="flex justify-between text-sm text-gray-500 mt-2"><span id="ram-text">Digunakan: <?php echo formatBytes($memory_usage['used']); ?></span><span>Total: <?php echo formatBytes($memory_usage['total']); ?></span></div><?php else: ?><p class="text-red-500 font-semibold">Tidak Didukung.</p><?php endif; ?></div><div class="bg-white rounded-lg shadow p-5 flex flex-col"><h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center"><svg class="h-6 w-6 text-sky-500 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" /></svg>Penyimpanan</h3><?php if ($storage_usage): ?><div class="w-full bg-gray-200 rounded-full h-6"><div id="storage-bar" class="bg-sky-500 h-6 text-xs font-medium text-sky-100 text-center p-1 leading-none rounded-full" style="width: <?php echo $storage_usage['percent']; ?>%"><?php echo $storage_usage['percent']; ?>%</div></div><div class="flex justify-between text-sm text-gray-500 mt-2"><span id="storage-text">Digunakan: <?php echo formatBytes($storage_usage['used']); ?></span><span>Total: <?php echo formatBytes($storage_usage['total']); ?></span></div><?php else: ?><p class="text-red-500 font-semibold">Tidak Didukung.</p><?php endif; ?></div></div></section><hr class="my-10 border-gray-200"><section id="project-management"><?php if ($message): ?><div class="mb-6 p-4 rounded-md <?php echo $message_type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'; ?>"><?php echo htmlspecialchars($message); ?></div><?php endif; ?><div class="bg-white rounded-lg shadow-lg"><div class="p-6 border-b border-gray-200"><h2 class="text-xl font-semibold">Manajemen Proyek</h2><p class="text-gray-600 mt-1">Atur versi PHP untuk setiap proyek.</p></div><div class="overflow-x-auto"><table class="min-w-full text-left"><thead class="bg-gray-50 border-b border-gray-200"><tr><th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Nama Proyek</th><th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Versi PHP</th><th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Aksi</th></tr></thead><tbody class="divide-y divide-gray-200">
+                <?php if (empty($projects)): ?><tr><td colspan="3" class="px-6 py-12 text-center text-gray-500"><p>Belum ada proyek.</p><p class="text-sm">Buat folder baru di `<?php echo WEB_ROOT; ?>`.</p></td></tr><?php else: ?>
+                <?php foreach ($projects as $project): ?><?php $current_version = $project_states[$project] ?? 'Default'; ?><tr class="hover:bg-gray-50"><td class="px-6 py-4 whitespace-nowrap"><div class="flex items-center"><svg class="h-6 w-6 text-yellow-500 mr-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" /></svg><a href="/<?php echo htmlspecialchars($project); ?>" target="_blank" class="font-medium text-indigo-600 hover:text-indigo-900"><?php echo htmlspecialchars($project); ?></a></div></td><td class="px-6 py-4 whitespace-nowrap"><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full <?php echo $current_version !== 'Default' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'; ?>"><?php echo htmlspecialchars($current_version); ?></span></td><td class="px-6 py-4 whitespace-nowrap text-sm font-medium"><form method="POST" action="index.php" class="flex items-center gap-2"><input type="hidden" name="project" value="<?php echo htmlspecialchars($project); ?>"><select name="php_version" class="block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"><?php foreach ($php_versions as $version): ?><option value="<?php echo $version; ?>" <?php echo ($project_states[$project] ?? '') === $version ? 'selected' : ''; ?>>PHP <?php echo $version; ?></option><?php endforeach; ?></select><button type="submit" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Simpan</button></form></td></tr><?php endforeach; ?><?php endif; ?>
+                </tbody></table></div></div></section></main><footer class="text-center text-gray-500 text-sm py-6 mt-4"><p>Dashboard &copy; <?php echo date("Y"); ?></p></footer><script>
+                    function formatBytesJS(bytes, decimals = 2) {if (!+bytes) return '0 B';const k = 1024;const dm = decimals < 0 ? 0 : decimals;const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];const i = Math.floor(Math.log(bytes) / Math.log(k));return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;}
+                    async function updateStats() {
+                        try {
+                            const response = await fetch('index.php?json=true', { cache: "no-store" });
+                            if (!response.ok) return;
+                            const data = await response.json();
+                            if (data.cpu) {const el = document.getElementById('cpu-bar');if (el) { el.style.width = data.cpu.percent + '%'; el.textContent = data.cpu.percent + '%'; }const txt = document.getElementById('cpu-text');if (txt) txt.textContent = 'Load: ' + data.cpu.load;}
+                            if (data.ram) {const el = document.getElementById('ram-bar');if (el) { el.style.width = data.ram.percent + '%'; el.textContent = data.ram.percent + '%'; }const txt = document.getElementById('ram-text');if (txt) txt.textContent = 'Digunakan: ' + formatBytesJS(data.ram.used);}
+                            if (data.storage) {const el = document.getElementById('storage-bar');if (el) { el.style.width = data.storage.percent + '%'; el.textContent = data.storage.percent + '%'; }const txt = document.getElementById('storage-text');if (txt) txt.textContent = 'Digunakan: ' + formatBytesJS(data.storage.used);}
+                        } catch (error) {console.error('Gagal memperbarui status:', error);}
+                    }
+                    setInterval(updateStats, 2000);
+                </script></body></html>
 EOF
 }
 
 phase5_finalize() {
-    print_info "FASE 5: Finalisasi...";
-    mkdir -p ${WEB_ROOT}/config || { print_error "Gagal membuat direktori config."; exit 1; }
-    touch ${WEB_ROOT}/config/project_versions.json || { print_error "Gagal membuat project_versions.json."; exit 1; }
-    chown -R www-data:www-data ${WEB_ROOT} || { print_error "Gagal mengubah kepemilikan direktori web root."; exit 1; }
-    restart_service apache2
-    apt-get autoremove -y || true
+    print_info "FASE 5: Finalisasi...";
+    mkdir -p ${WEB_ROOT}/config || { print_error "Gagal membuat direktori config."; exit 1; }
+    touch ${WEB_ROOT}/config/project_versions.json || { print_error "Gagal membuat project_versions.json."; exit 1; }
+    chown -R www-data:www-data ${WEB_ROOT} || { print_error "Gagal mengubah kepemilikan direktori web root."; exit 1; }
+    restart_service apache2
+    apt-get autoremove -y || true
 }
 
 display_summary() {
-    IP_ADDRESS=$(hostname -I | awk '{print $1}' | xargs)
-    clear;
-    print_success "INSTALASI SELESAI!"
-    echo "======================================================================" | tee -a "$LOG_FILE"; printf "\n" | tee -a "$LOG_FILE"
-    printf "  Dashboard: \e[1;36mhttp://%s/\e[0m\n\n" "${IP_ADDRESS}" | tee -a "$LOG_FILE"
-    printf "  Akses Alat Bantu:\n";
-    printf "+-----------------+------------------------------------------+\n" | tee -a "$LOG_FILE"
-    printf "| \e[1;32m%s\e[0m        | \e[1;36m%s\e[0m                                  |\n" "ALAT" "DETAIL" | tee -a "$LOG_FILE"
-    printf "+-----------------+------------------------------------------+\n" | tee -a "$LOG_FILE"
-    printf "| File Manager    | URL: http://%s/file-manager/           |\n" "${IP_ADDRESS}" | tee -a "$LOG_FILE"
-    printf "|                 | User: %-36s |\n" "${TFM_USER}" | tee -a "$LOG_FILE";
-    printf "|                 | Pass: %-36s |\n" "${TFM_PASS}" | tee -a "$LOG_FILE"
-    printf "+-----------------+------------------------------------------+\n" | tee -a "$LOG_FILE"
-    printf "| phpMyAdmin      | URL: http://%s/phpmyadmin              |\n" "${IP_ADDRESS}" | tee -a "$LOG_FILE"
-    printf "|                 | User: %-36s |\n" "${PMA_USER}" | tee -a "$LOG_FILE";
-    printf "|                 | Pass: %-36s |\n" "${PMA_PASS}" | tee -a "$LOG_FILE"
-    printf "+-----------------+------------------------------------------+\n" | tee -a "$LOG_FILE"
-    printf "| DB Root         | User: root                               |\n" | tee -a "$LOG_FILE"
-    printf "|                 | Pass: %-36s |\n" "${MARIADB_ROOT_PASS}" | tee -a "$LOG_FILE"
-    printf "+-----------------+------------------------------------------+\n\n" | tee -a "$LOG_FILE"
-    
-    # Menambahkan info akses dummy project phpinfo
-    printf "  Project Testing PHPInfo: \e[1;36mhttp://%s/test_project_phpinfo/\e[0m\n\n" "${IP_ADDRESS}" | tee -a "$LOG_FILE"
-    
-    print_warning "Catat semua kredensial ini dan simpan di tempat yang aman."
-    echo "======================================================================" | tee -a "$LOG_FILE"
+    IP_ADDRESS=$(hostname -I | awk '{print $1}' | xargs)
+    clear;
+    print_success "INSTALASI SELESAI!"
+    echo "======================================================================" | tee -a "$LOG_FILE"; printf "\n" | tee -a "$LOG_FILE"
+    printf "  Dashboard: \e[1;36mhttp://%s/\e[0m\n\n" "${IP_ADDRESS}" | tee -a "$LOG_FILE"
+    printf "  Akses Alat Bantu:\n";
+    printf "+-----------------+------------------------------------------+\n" | tee -a "$LOG_FILE"
+    printf "| \e[1;32m%s\e[0m        | \e[1;36m%s\e[0m                                  |\n" "ALAT" "DETAIL" | tee -a "$LOG_FILE"
+    printf "+-----------------+------------------------------------------+\n" | tee -a "$LOG_FILE"
+    printf "| File Manager    | URL: http://%s/file-manager/           |\n" "${IP_ADDRESS}" | tee -a "$LOG_FILE"
+    printf "|                 | User: %-36s |\n" "${TFM_USER}" | tee -a "$LOG_FILE";
+    printf "|                 | Pass: %-36s |\n" "${TFM_PASS}" | tee -a "$LOG_FILE"
+    printf "+-----------------+------------------------------------------+\n" | tee -a "$LOG_FILE"
+    printf "| phpMyAdmin      | URL: http://%s/phpmyadmin              |\n" "${IP_ADDRESS}" | tee -a "$LOG_FILE"
+    printf "|                 | User: %-36s |\n" "${PMA_USER}" | tee -a "$LOG_FILE";
+    printf "|                 | Pass: %-36s |\n" "${PMA_PASS}" | tee -a "$LOG_FILE"
+    printf "+-----------------+------------------------------------------+\n" | tee -a "$LOG_FILE"
+    printf "| DB Root         | User: root                               |\n" | tee -a "$LOG_FILE"
+    printf "|                 | Pass: %-36s |\n" "${MARIADB_ROOT_PASS}" | tee -a "$LOG_FILE"
+    printf "+-----------------+------------------------------------------+\n\n" | tee -a "$LOG_FILE"
+    
+    # Menambahkan info akses dummy project phpinfo
+    printf "  Project Testing PHPInfo: \e[1;36mhttp://%s/test_project_phpinfo/\e[0m\n\n" "${IP_ADDRESS}" | tee -a "$LOG_FILE"
+    
+    print_warning "Catat semua kredensial ini dan simpan di tempat yang aman."
+    echo "======================================================================" | tee -a "$LOG_FILE"
 }
 
 main() {
-    # Buat file log sebelum memulai operasi
-    touch "$LOG_FILE" || { echo "Gagal membuat file log: $LOG_FILE. Keluar."; exit 1; }
-    echo "--- Memulai Skrip Instalasi Dashboard Server ---" | tee -a "$LOG_FILE"
-    echo "Log akan disimpan di: $LOG_FILE" | tee -a "$LOG_FILE"
-    
-    trap cleanup_on_error ERR;
-    check_root
-    if [ -f "$LOCK_FILE" ]; then
-        print_warning "Ditemukan sisa instalasi yang mungkin gagal sebelumnya."
-        read -p "Pilih tindakan: [1] Ulang dari Awal (bersihkan semua) atau [2] Keluar: " resume_choice < /dev/tty
-        case $resume_choice in
-            1) silent_cleanup ;;
-            *) echo "Instalasi dibatalkan."; exit 0 ;;
-        esac
-    fi
-    
-    touch "$LOCK_FILE" || { print_error "Gagal membuat file kunci instalasi."; exit 1; }
-    get_setup_choices "$@"
-    
-    phase1_setup_stack
-    phase2_install_multi_php
-    phase3_configure_apache
-    phase4_install_tools
-    
-    # --- Tambahan untuk dummy project PHPInfo ---
-    print_info "Membuat dummy project 'test_project_phpinfo' untuk pengujian..."
-    mkdir -p "${WEB_ROOT}/test_project_phpinfo" || { print_error "Gagal membuat direktori dummy project."; exit 1; }
-    echo '<?php phpinfo(); ?>' > "${WEB_ROOT}/test_project_phpinfo/index.php" || { print_error "Gagal membuat file phpinfo.php di dummy project."; exit 1; }
-    chown -R www-data:www-data "${WEB_ROOT}/test_project_phpinfo" || { print_error "Gagal mengatur kepemilikan dummy project."; exit 1; }
-    print_success "Dummy project 'test_project_phpinfo' berhasil dibuat."
-    # --- Akhir tambahan dummy project PHPInfo ---
+    # Buat file log sebelum memulai operasi
+    touch "$LOG_FILE" || { echo "Gagal membuat file log: $LOG_FILE. Keluar."; exit 1; }
+    echo "--- Memulai Skrip Instalasi Dashboard Server ---" | tee -a "$LOG_FILE"
+    echo "Log akan disimpan di: $LOG_FILE" | tee -a "$LOG_FILE"
+    
+    trap cleanup_on_error ERR;
+    check_root
+    if [ -f "$LOCK_FILE" ]; then
+        print_warning "Ditemukan sisa instalasi yang mungkin gagal sebelumnya."
+        read -p "Pilih tindakan: [1] Ulang dari Awal (bersihkan semua) atau [2] Keluar: " resume_choice < /dev/tty
+        case $resume_choice in
+            1) silent_cleanup ;;
+            *) echo "Instalasi dibatalkan."; exit 0 ;;
+        esac
+    fi
+    
+    touch "$LOCK_FILE" || { print_error "Gagal membuat file kunci instalasi."; exit 1; }
+    get_setup_choices "$@"
+    
+    phase1_setup_stack
+    phase2_install_multi_php
+    phase3_configure_apache
+    phase4_install_tools
+    
+    # --- Tambahan untuk dummy project PHPInfo dan Hello World ---
+    print_info "Membuat dummy project 'test_project_phpinfo' untuk pengujian PHPInfo..."
+    mkdir -p "${WEB_ROOT}/test_project_phpinfo" || { print_error "Gagal membuat direktori dummy project 'test_project_phpinfo'."; exit 1; }
+    echo '<?php phpinfo(); ?>' > "${WEB_ROOT}/test_project_phpinfo/index.php" || { print_error "Gagal membuat file phpinfo.php di dummy project 'test_project_phpinfo'."; exit 1; }
+    chown -R www-data:www-data "${WEB_ROOT}/test_project_phpinfo" || { print_error "Gagal mengatur kepemilikan dummy project 'test_project_phpinfo'."; exit 1; }
+    print_success "Dummy project 'test_project_phpinfo' berhasil dibuat."
 
-    phase5_finalize
-    
-    trap - ERR;
-    rm -f "$LOCK_FILE" || print_warning "Gagal menghapus file kunci instalasi.";
-    display_summary
-    echo "--- Skrip Instalasi Selesai ---" | tee -a "$LOG_FILE"
+    print_info "Membuat dummy project 'test_project_hello' untuk pengujian sederhana..."
+    mkdir -p "${WEB_ROOT}/test_project_hello" || { print_error "Gagal membuat direktori dummy project 'test_project_hello'."; exit 1; }
+    echo '<?php echo "Hello World dari proyek PHP!"; ?>' > "${WEB_ROOT}/test_project_hello/index.php" || { print_error "Gagal membuat file index.php di dummy project 'test_project_hello'."; exit 1; }
+    chown -R www-data:www-data "${WEB_ROOT}/test_project_hello" || { print_error "Gagal mengatur kepemilikan dummy project 'test_project_hello'."; exit 1; }
+    print_success "Dummy project 'test_project_hello' berhasil dibuat."
+    # --- Akhir tambahan dummy projects ---
+
+    phase5_finalize
+    
+    trap - ERR;
+    rm -f "$LOCK_FILE" || print_warning "Gagal menghapus file kunci instalasi.";
+    display_summary
+    echo "--- Skrip Instalasi Selesai ---" | tee -a "$LOG_FILE"
 }
 
 main "$@"
