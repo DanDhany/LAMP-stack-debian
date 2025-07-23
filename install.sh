@@ -25,8 +25,8 @@ print_error() { echo -e "\e[31m❌ ERROR: $1\e[0m"; }
 
 check_root() {
     if [ "$(id -u)" != "0" ]; then
-       print_error "Skrip ini harus dijalankan sebagai root atau dengan sudo."
-       exit 1
+        print_error "Skrip ini harus dijalankan sebagai root atau dengan sudo."
+        exit 1
     fi
 }
 
@@ -65,7 +65,8 @@ phase1_setup_stack() {
     print_info "Mengamankan instalasi MariaDB..."
     mysql -e "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('$MARIADB_ROOT_PASS');"
     mysql -e "DELETE FROM mysql.user WHERE User='';"
-    mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '12.0.0.1', '::1');"
+    # DIPERBAIKI: Menggunakan 127.0.0.1 bukan 12.0.0.1
+    mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
     mysql -e "DROP DATABASE IF EXISTS test;"
     mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
     mysql -e "FLUSH PRIVILEGES;"
@@ -116,7 +117,6 @@ EOF
 phase4_install_tools() {
     print_info "FASE 4: Memasang Alat Bantu..."
     print_info "Membuat skrip helper '/usr/local/bin/set_php_version.sh'..."
-    # 'EOF' dalam tanda kutip untuk mencegah ekspansi variabel ($PROJECT_NAME, dll) saat skrip ini dibuat.
     cat <<'EOF' > /usr/local/bin/set_php_version.sh
 #!/bin/bash
 set -e
@@ -175,7 +175,8 @@ EOF
     TFM_PASS_HASH=$(php -r "echo password_hash('$TFM_PASS', PASSWORD_DEFAULT);")
     sed -i "s#^// \$auth_users = array(#\$auth_users = array(#g" "${WEB_ROOT}/file-manager/index.php"
     sed -i "s#'admin' => '\$2y\$10\$KVMiF8xX25eQOXYN225m9uC4S3A9H2x2B.aQ.Y3oZ4a.aQ.Y3oZ4a'#'${TFM_USER}' => '${TFM_PASS_HASH}'#g" "${WEB_ROOT}/file-manager/index.php"
-    sed -i "/'user'  =>/d" "${WEB_ROOT}/file-manager/index.php"
+    # DIPERBAIKI: Menggunakan regex yang lebih aman
+    sed -i "/'user'\s*=>/d" "${WEB_ROOT}/file-manager/index.php"
     sed -i "s#\$root_path = \$_SERVER\['DOCUMENT_ROOT'\];#\$root_path = '${WEB_ROOT}';#g" "${WEB_ROOT}/file-manager/index.php"
 
     print_info "Membuat file dashboard utama 'index.php'..."
