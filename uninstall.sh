@@ -20,7 +20,7 @@ confirm_uninstall() {
     echo ""
     echo -e "\e[31mPERINGATAN:\e[0m Skrip ini akan MENGHAPUS komponen berikut:"
     echo "  - Apache2, MariaDB, phpMyAdmin, Shell In A Box"
-    echo "  - Semua versi PHP dari PPA Ondřej Surý"
+    echo "  - Semua versi PHP dari repositori Sury.org"
     echo "  - Semua file di /var/www/html (termasuk dashboard & file manager)"
     echo "  - Semua database MariaDB (termasuk data di dalamnya)"
     echo "  - Semua file konfigurasi terkait."
@@ -50,14 +50,14 @@ purge_packages() {
     print_info "Menghapus paket-paket utama (purge)..."
     apt-get purge --auto-remove -y apache2* mariadb-* phpmyadmin shellinabox
     
-    print_info "Menghapus semua paket PHP dari PPA..."
+    print_info "Menghapus semua paket PHP..."
     apt-get purge --auto-remove -y "php*" || true
 }
 
 remove_manual_files() {
-    print_info "Menghapus file PPA dan GPG Key yang dibuat secara manual..."
-    rm -f /etc/apt/sources.list.d/ondrej-php.list
-    rm -f /usr/share/keyrings/ondrej-php.gpg
+    print_info "Menghapus file repositori dan GPG Key..."
+    rm -f /etc/apt/sources.list.d/php.list
+    rm -f /usr/share/keyrings/deb.sury.org-php.gpg
 
     print_info "Menghapus file dan direktori kustom lainnya..."
     rm -f /usr/local/bin/set_php_version.sh

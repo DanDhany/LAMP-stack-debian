@@ -3,7 +3,7 @@
 # ==============================================================================
 #   Skrip Otomatis Pemasangan Dashboard Server & Manajemen Multi-PHP (Revisi Final)
 # ==============================================================================
-#   FITUR: Instalasi Ekstensi Cerdas, Pemilihan PHP, Mode Otomatis/Manual, Deteksi systemd, Rollback.
+#   DIPERBAIKI: Menggunakan repositori packages.sury.org khusus Debian.
 # ==============================================================================
 
 # Keluar segera jika ada perintah yang gagal
@@ -14,6 +14,7 @@ export DEBIAN_FRONTEND=noninteractive
 WEB_ROOT="/var/www/html"
 PHP_VERSIONS_DEFAULT=("7.4" "8.2")
 PHP_VERSIONS_TO_INSTALL=()
+PHP_VERSIONS_STABLE=("8.3" "8.2" "8.1" "8.0" "7.4" "5.6")
 
 # -- FUNGSI BANTUAN --
 print_info() { echo -e "\n\e[34m🔵 INFO: $1\e[0m"; }
@@ -28,8 +29,8 @@ cleanup_on_error() {
     trap - ERR
     if [ "$USE_SYSTEMD" = "yes" ]; then systemctl stop apache2 mariadb shellinabox || true; else service apache2 stop || true; service mariadb stop || true; service shellinabox stop || true; fi
     apt-get purge --auto-remove -y apache2* mariadb-* phpmyadmin shellinabox "php*" || true
-    rm -f /etc/apt/sources.list.d/ondrej-php.list
-    rm -f /usr/share/keyrings/ondrej-php.gpg
+    rm -f /etc/apt/sources.list.d/php.list
+    rm -f /etc/apt/trusted.gpg.d/php.gpg
     rm -f /usr/local/bin/set_php_version.sh
     rm -f /etc/sudoers.d/www-data-php-manager
     rm -f /etc/apache2/conf-available/php-per-project.conf
@@ -59,19 +60,14 @@ generate_random_string() {
     openssl rand -base64 12
 }
 
-add_ppa_manually() {
-    print_info "Menambahkan PPA 'ppa:ondrej/php' secara manual..."
-    apt-get install -y gpg curl
-    local key_url="https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x14AA40EC0831756756D7F66C4F4EA0AAE5267A6C"
-    local key_path="/usr/share/keyrings/ondrej-php.gpg"
-    curl -sSL "$key_url" | gpg --dearmor -o "$key_path"
-    
-    local source_file="/etc/apt/sources.list.d/ondrej-php.list"
-    echo "deb [signed-by=${key_path}] https://ppa.launchpadcontent.net/ondrej/php/ubuntu jammy main" > "$source_file"
-    
-    print_info "Memperbarui daftar paket setelah menambahkan PPA..."
+add_php_repository() {
+    print_info "Menambahkan repositori PHP dari packages.sury.org (untuk Debian)..."
+    apt-get install -y lsb-release ca-certificates apt-transport-https software-properties-common gnupg
+    curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg https://packages.sury.org/php/apt.gpg
+    echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
     apt-get update
 }
+
 
 get_setup_choices() {
     clear
@@ -92,14 +88,7 @@ get_setup_choices() {
         [[ "$SYSTEMD_CHOICE" =~ ^[Yy]$ ]] && USE_SYSTEMD="no" || USE_SYSTEMD="yes"
     fi
     
-    apt-get update
-    apt-get install -y ca-certificates software-properties-common
-    add_ppa_manually
-    
-    LATEST_VERSIONS=($(apt-cache search --names-only '^php[0-9]\.[0-9]$' | awk '{print $1}' | sed 's/php//' | sort -V -r | head -n 5))
-    AVAILABLE_VERSIONS=("${LATEST_VERSIONS[@]}")
-    [[ " ${AVAILABLE_VERSIONS[*]} " =~ " 7.4 " ]] || AVAILABLE_VERSIONS+=("7.4")
-    [[ " ${AVAILABLE_VERSIONS[*]} " =~ " 5.6 " ]] || AVAILABLE_VERSIONS+=("5.6")
+    local AVAILABLE_VERSIONS=("${PHP_VERSIONS_STABLE[@]}")
 
     if [ "$INSTALL_MODE" = "2" ]; then
         echo "-----------------------------------------------------"
@@ -140,8 +129,10 @@ get_setup_choices() {
 
 phase1_setup_stack() {
     print_info "FASE 1: Memulai Instalasi Dasar..."
-    apt-get upgrade -y
-    apt-get install -y apache2 mariadb-server mariadb-client curl wget
+    apt-get update && apt-get upgrade -y
+    
+    print_info "Menginstal Apache2, MariaDB, dan paket pendukung..."
+    apt-get install -y apache2 mariadb-server mariadb-client curl wget bc
     
     print_info "Menjalankan dan mengaktifkan service Apache2 & MariaDB..."
     start_service apache2 && enable_service apache2
@@ -161,24 +152,20 @@ phase1_setup_stack() {
     mysql -u root -p"$MARIADB_ROOT_PASS" -e "FLUSH PRIVILEGES;"
 }
 
-# ==============================================================================
-# FUNGSI phase2_install_multi_php DIUBAH DI SINI
-# ==============================================================================
 phase2_install_multi_php() {
     print_info "FASE 2: Menginstal Versi PHP yang Dipilih..."
+    # Menambahkan repositori PHP khusus Debian
+    add_php_repository
+    
     for version in "${PHP_VERSIONS_TO_INSTALL[@]}"; do
         print_info "Menginstal PHP ${version}-FPM dan ekstensinya..."
         
-        # Daftar ekstensi dasar yang umum untuk semua versi
         local extensions=("mysql" "xml" "curl" "zip" "mbstring" "bcmath" "soap" "intl" "gd")
         
-        # Logika Cerdas: Untuk versi PHP < 8.0, tambahkan 'json' secara manual
-        # bc adalah program kalkulator, -l memuat library matematika
         if (( $(echo "$version < 8.0" | bc -l) )); then
             extensions+=("json")
         fi
         
-        # Membangun daftar paket lengkap untuk diinstal
         local packages_to_install=()
         packages_to_install+=("php${version}")
         packages_to_install+=("php${version}-fpm")
@@ -186,7 +173,6 @@ phase2_install_multi_php() {
             packages_to_install+=("php${version}-${ext}")
         done
         
-        # Menjalankan instalasi
         apt-get install -y "${packages_to_install[@]}"
     done
 
@@ -196,7 +182,7 @@ phase2_install_multi_php() {
     apt-get install -y phpmyadmin
 }
 
-# Sisa skrip tidak berubah...
+# Sisa skrip (phase3, phase4, phase5, display_summary, main) tetap sama
 
 phase3_configure_apache() {
     print_info "FASE 3: Melakukan Konfigurasi Apache..."
