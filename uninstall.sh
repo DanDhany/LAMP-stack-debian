@@ -1,42 +1,140 @@
 #!/bin/bash
 set -e
-print_info() { echo -e "\n\e[34m🔵 INFO: $1\e[0m"; }
-print_success() { echo -e "\e[32m✅ SUKSES: $1\e[0m"; }
-print_error() { echo -e "\e[31m❌ ERROR: $1\e[0m"; }
-confirm_uninstall() {
-    clear; echo "======================================================================"
-    echo "          Skrip Uninstall untuk Dashboard Server Otomatis"
-    echo "======================================================================"; echo ""
-    echo -e "\e[31mPERINGATAN:\e[0m Skrip ini akan MENGHAPUS semua komponen..."; echo "" # Diringkas
-    read -p "Anda yakin ingin melanjutkan? [y/N] " -n 1 -r; echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then echo "Proses uninstall dibatalkan."; exit 1; fi
+
+# --- Variabel Global untuk Logging ---
+LOG_DIR="/var/log/dashboard" # Direktori log yang kemungkinan dibuat oleh install.sh
+UNINSTALL_LOG_FILE="${LOG_DIR}/dashboard_uninstall_$(date +%Y%m%d_%H%M%S).log" # Log untuk uninstall
+
+# Pastikan direktori log ada untuk uninstall log (jika belum ada)
+mkdir -p "$LOG_DIR" || { echo "Gagal membuat direktori log: $LOG_DIR. Keluar."; exit 1; }
+touch "$UNINSTALL_LOG_FILE" || { echo "Gagal membuat log file uninstall: $UNINSTALL_LOG_FILE. Keluar."; exit 1; }
+
+# --- FUNGSI BANTUAN (Dengan Logging) ---
+log_message_uninstall() {
+    local type="$1"
+    local message="$2"
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    echo "[$timestamp] [$type] [uninstall.sh] $message" | tee -a "$UNINSTALL_LOG_FILE"
 }
-stop_and_disable_services() {
-    print_info "Menghentikan service..."
-    if [ -d /run/systemd/system ]; then
-        systemctl stop apache2 mariadb || true; systemctl disable apache2 mariadb || true
-    else
-        service apache2 stop || true; service mariadb stop || true
+
+print_info() { log_message_uninstall "INFO" "\e[34m🔵 INFO: $1\e[0m"; }
+print_success() { log_message_uninstall "SUCCESS" "\e[32m✅ SUKSES: $1\e[0m"; }
+print_error() { log_message_uninstall "ERROR" "\e[31m❌ ERROR: $1\e[0m"; }
+
+confirm_uninstall() {
+    clear;
+    echo "======================================================================" | tee -a "$UNINSTALL_LOG_FILE"
+    echo "          Skrip Uninstall untuk Dashboard Server Otomatis" | tee -a "$UNINSTALL_LOG_FILE"
+    echo "======================================================================" | tee -a "$UNINSTALL_LOG_FILE";
+    echo "" | tee -a "$UNINSTALL_LOG_FILE"
+    echo -e "\e[31mPERINGATAN:\e[0m Skrip ini akan MENGHAPUS SEMUA komponen Apache, MariaDB, PHP," | tee -a "$UNINSTALL_LOG_FILE"
+    echo "konfigurasi, dan SEMUA DATA terkait termasuk database dan file proyek di /var/www/html/." | tee -a "$UNINSTALL_LOG_FILE"
+    echo "" | tee -a "$UNINSTALL_LOG_FILE"
+    read -p "Anda yakin ingin melanjutkan? [y/N] " -n 1 -r;
+    echo "" | tee -a "$UNINSTALL_LOG_FILE"
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        print_info "Proses uninstall dibatalkan oleh pengguna."
+        exit 1;
     fi
 }
+
+stop_and_disable_services() {
+    print_info "Menghentikan dan menonaktifkan service..."
+    # Hentikan semua service yang mungkin berjalan
+    if [ -d /run/systemd/system ]; then
+        systemctl stop apache2 mariadb php*-fpm || true
+        systemctl disable apache2 mariadb php*-fpm || true
+    else
+        service apache2 stop || true
+        service mariadb stop || true
+        # Untuk non-systemd, mungkin perlu mematikan secara manual semua versi PHP-FPM
+        # pkill -f php-fpm || true # Ini lebih agresif
+    fi
+}
+
 purge_packages() {
-    print_info "Menghapus paket-paket..."; apt-get purge --auto-remove -y apache2* mariadb-* phpmyadmin "php*" || true
+    print_info "Menghapus paket-paket dan dependensi terkait dengan opsi --purge..."
+    # Gunakan --purge untuk menghapus file konfigurasi juga
+    apt-get purge --auto-remove -y apache2* mariadb-* phpmyadmin "php*" || true
+    
+    # Menghapus dependensi yang mungkin terinstal secara otomatis dan tidak lagi dibutuhkan
+    apt-get autoremove -y || true
+    apt-get clean && apt-get autoclean || true # Membersihkan cache paket
 }
+
 remove_manual_files() {
-    print_info "Menghapus file manual..."
-    rm -f /etc/apt/sources.list.d/php.list; rm -f /usr/share/keyrings/deb.sury.org-php.gpg
-    rm -f /usr/local/bin/set_php_version.sh; rm -f /etc/sudoers.d/www-data-php-manager
-    rm -f /etc/apache2/conf-available/php-per-project.conf
-    rm -rf /var/www/html/*; rm -rf /var/lib/mysql
-    # DIPERBARUI: Hapus juga file lock
-    rm -f /tmp/.dashboard_install_lock
+    print_info "Menghapus file dan direktori manual yang dibuat oleh skrip instalasi..."
+
+    # Apache/PHP FPM related configurations
+    rm -f /etc/apt/sources.list.d/php.list || true
+    rm -f /usr/share/keyrings/deb.sury.org-php.gpg || true
+    rm -f /usr/local/bin/set_php_version.sh || true
+    rm -f /etc/sudoers.d/www-data-php-manager || true
+    
+    # Remove custom Apache configurations
+    rm -f /etc/apache2/conf-available/php-per-project.conf || true
+    rm -f /etc/apache2/conf-available/phpmyadmin-override.conf || true
+    rm -f /etc/apache2/conf-available/phpmyadmin-handler.conf || true # Jika ada
+
+    # Remove main Apache config for PHP-FPM that might be auto-generated by PHP packages
+    # Loop through installed PHP versions to remove their Apache config
+    for version_dir in /etc/php/*/ ; do
+        PHP_VERSION_NUM=$(basename "$version_dir")
+        # Example: /etc/apache2/conf-available/php${PHP_VERSION_NUM}-fpm.conf
+        rm -f "/etc/apache2/conf-available/php${PHP_VERSION_NUM}-fpm.conf" || true
+    done
+
+    # Cleanup Apache site configurations that might be left
+    rm -f /etc/apache2/sites-available/* || true
+    rm -f /etc/apache2/sites-enabled/* || true
+    # Re-create default site if removed, Apache often requires it
+    # No, not recreating default site in uninstall. That's a clean slate.
+
+    # Remove web root content and MariaDB data
+    print_info "Menghapus seluruh konten dari /var/www/html/ dan data MariaDB di /var/lib/mysql/..."
+    # Hati-hati dengan rm -rf /var/www/html/ dan /var/lib/mysql/
+    # Lebih aman menghapus konten di dalamnya daripada direktori itu sendiri
+    # agar struktur dasar sistem tetap utuh. Namun, untuk "bersih total",
+    # kita bisa menghapus direktori jika diinginkan.
+    # Untuk tujuan uninstall server ini, kita akan menghapus direktori secara rekursif.
+    rm -rf /var/www/html/* || true
+    rm -rf /var/lib/mysql/* || true
+    
+    # Remove dummy projects and config folder
+    rm -rf /var/www/html/test_project_phpinfo || true
+    rm -rf /var/www/html/test_project_hello || true
+    rm -rf /var/www/html/config || true # Hapus folder config dashboard
+
+    # Remove lock file
+    rm -f /tmp/.dashboard_install_lock || true
+
+    # Remove dashboard log directory and its contents
+    print_info "Menghapus direktori log dashboard (/var/log/dashboard) dan isinya..."
+    rm -rf /var/log/dashboard || true
 }
-final_cleanup() {
-    print_info "Membersihkan sisa paket..."; apt-get autoremove -y; apt-get update
+
+final_cleanup_apt() {
+    print_info "Melakukan pembersihan APT terakhir..."
+    apt-get update || true # Refresh list setelah pembersihan
+    print_success "Pembersihan APT selesai."
 }
+
 main() {
-    if [ "$(id -u)" != "0" ]; then print_error "Skrip harus dijalankan sebagai root."; exit 1; fi
-    confirm_uninstall; stop_and_disable_services; purge_packages; remove_manual_files; final_cleanup
-    print_success "Proses uninstall selesai."
+    echo "--- Memulai Skrip Uninstall Dashboard Server ---" | tee -a "$UNINSTALL_LOG_FILE"
+    echo "Log uninstall akan disimpan di: $UNINSTALL_LOG_FILE" | tee -a "$UNINSTALL_LOG_FILE"
+    
+    if [ "$(id -u)" != "0" ]; then
+        print_error "Skrip ini harus dijalankan sebagai root atau dengan sudo.";
+        exit 1;
+    fi
+    confirm_uninstall
+    stop_and_disable_services
+    purge_packages
+    remove_manual_files
+    final_cleanup_apt
+    print_success "Proses uninstall selesai sepenuhnya."
+    echo "Harap pertimbangkan untuk me-reboot server Anda untuk memastikan semua perubahan diterapkan." | tee -a "$UNINSTALL_LOG_FILE"
+    echo "--- Skrip Uninstall Selesai ---" | tee -a "$UNINSTALL_LOG_FILE"
 }
+
 main
