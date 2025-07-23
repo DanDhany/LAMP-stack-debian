@@ -1,19 +1,20 @@
 #!/bin/bash
 
 # ==============================================================================
-#   Skrip Otomatis Pemasangan Dashboard Server & Manajemen Multi-PHP (Revisi Final)
+#   Skrip Otomatis Pemasangan Dashboard Server & Manajemen Multi-PHP (Final Lengkap)
 # ==============================================================================
-#   DIPERBAIKI: File index.php sekarang ditanamkan langsung untuk stabilitas.
+#   Menggabungkan semua fitur: Mode Ganda (Interaktif/Non-Interaktif),
+#   Deteksi systemd, Rollback, PHP Default Otomatis, dan semua alat bantu.
 # ==============================================================================
 
 # Keluar segera jika ada perintah yang gagal
-set -e
+set -x
 
 # -- VARIABEL GLOBAL --
 export DEBIAN_FRONTEND=noninteractive
 WEB_ROOT="/var/www/html"
 LOCK_FILE="/tmp/.dashboard_install_lock"
-PHP_VERSIONS_DEFAULT=("7.4" "8.2")
+PHP_VERSIONS_DEFAULT=("8.3" "7.4") # Default diurutkan dari baru ke lama
 PHP_VERSIONS_TO_INSTALL=()
 PHP_VERSIONS_STABLE=("8.3" "8.2" "8.1" "8.0" "7.4" "5.6")
 
@@ -27,6 +28,8 @@ install_packages() {
     print_info "Menginstal paket: $@"; echo -e '#!/bin/sh\nexit 0' > /usr/sbin/policy-rc.d; chmod +x /usr/sbin/policy-rc.d
     apt-get install -y "$@" || true; rm -f /usr/sbin/policy-rc.d
 }
+
+# -- FUNGSI ROLLBACK & CLEANUP --
 silent_cleanup() {
     print_info "Menjalankan pembersihan otomatis..."; trap - ERR
     if [ "${USE_SYSTEMD:-yes}" = "yes" ]; then systemctl stop apache2 mariadb || true; else service apache2 stop || true; service mariadb stop || true; fi
@@ -37,10 +40,13 @@ silent_cleanup() {
     apt-get autoremove -y; print_success "Pembersihan selesai."
 }
 cleanup_on_error() { print_error "Instalasi gagal."; silent_cleanup; print_error "Rollback Selesai."; exit 1; }
+
+# -- FUNGSI MANAJEMEN SERVICE --
 start_service() { if [ "$USE_SYSTEMD" = "yes" ]; then systemctl start "$1"; else service "$1" start; fi; }
 enable_service() { if [ "$USE_SYSTEMD" = "yes" ]; then systemctl enable "$1"; else update-rc.d "$1" defaults; fi; }
 restart_service() { if [ "$USE_SYSTEMD" = "yes" ]; then systemctl restart "$1"; else service "$1" restart; fi; }
 
+# -- FUNGSI-FUNGSI INSTALASI --
 check_root() { if [ "$(id -u)" != "0" ]; then print_error "Skrip ini harus dijalankan sebagai root."; exit 1; fi; }
 generate_random_string() { openssl rand -base64 12; }
 add_php_repository() {
@@ -49,34 +55,40 @@ add_php_repository() {
     echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" | tee /etc/apt/sources.list.d/php.list
     apt-get update
 }
+
 get_setup_choices() {
-    clear; echo "======================================================================"
-    echo "      Selamat Datang di Skrip Pemasangan Dashboard Otomatis"; echo "======================================================================"
-    print_warning "Pastikan skrip ini dijalankan pada sistem Debian 12 yang bersih."; echo ""
-    read -p "Pilih mode instalasi [1] Otomatis (default) atau [2] Manual: " MODE_CHOICE < /dev/tty
-    INSTALL_MODE=${MODE_CHOICE:-1}
-    if [ -d /run/systemd/system ]; then USE_SYSTEMD="yes"; print_info "Deteksi systemd berhasil."; else read -p "Lingkungan non-systemd terdeteksi. Apakah ini benar? [y/N]: " SYSTEMD_CHOICE < /dev/tty; [[ "$SYSTEMD_CHOICE" =~ ^[Yy]$ ]] && USE_SYSTEMD="no" || USE_SYSTEMD="yes"; fi
-    local AVAILABLE_VERSIONS=("${PHP_VERSIONS_STABLE[@]}");
-    if [ "$INSTALL_MODE" = "2" ]; then
-        echo "-----------------------------------------------------"; PS3="Pilih versi PHP (pisahkan dengan spasi): "; select v in "${AVAILABLE_VERSIONS[@]}"; do if [ -n "$REPLY" ]; then for choice in $REPLY; do PHP_VERSIONS_TO_INSTALL+=("${AVAILABLE_VERSIONS[$choice-1]}"); done; break; else echo "Pilihan tidak valid."; fi; done < /dev/tty
+    if [ "$#" -gt 0 ]; then
+        print_info "Menjalankan dalam mode non-interaktif..."
+        INSTALL_MODE="$1"; USE_SYSTEMD="$2"; IFS=',' read -r -a PHP_VERSIONS_TO_INSTALL <<< "$3"
+        MARIADB_ROOT_PASS="$4"; PMA_USER="$5"; PMA_PASS="$6"; TFM_USER="$7"; TFM_PASS="$8"
     else
-        print_info "Mode Otomatis: Pilih versi PHP atau Enter untuk default (${PHP_VERSIONS_DEFAULT[*]})."; echo "Versi yang tersedia: ${AVAILABLE_VERSIONS[*]}"
-        read -p "Pilihan Anda (pisahkan spasi) atau Enter: " PHP_CHOICE < /dev/tty
-        if [ -z "$PHP_CHOICE" ]; then PHP_VERSIONS_TO_INSTALL=("${PHP_VERSIONS_DEFAULT[@]}"); else PHP_VERSIONS_TO_INSTALL=($PHP_CHOICE); fi
+        clear; echo "======================================================================"
+        echo "      Selamat Datang di Skrip Pemasangan Dashboard Otomatis"; echo "======================================================================"
+        print_warning "Pastikan skrip ini dijalankan pada sistem Debian 12 yang bersih."; echo ""
+        read -p "Pilih mode instalasi [1] Otomatis (default) atau [2] Manual: " MODE_CHOICE < /dev/tty
+        INSTALL_MODE=${MODE_CHOICE:-1}
+        if [ -d /run/systemd/system ]; then USE_SYSTEMD="yes"; print_info "Deteksi systemd berhasil."; else read -p "Lingkungan non-systemd terdeteksi. Apakah ini benar? [y/N]: " SYSTEMD_CHOICE < /dev/tty; [[ "$SYSTEMD_CHOICE" =~ ^[Yy]$ ]] && USE_SYSTEMD="no" || USE_SYSTEMD="yes"; fi
+        local AVAILABLE_VERSIONS=("${PHP_VERSIONS_STABLE[@]}");
+        if [ "$INSTALL_MODE" = "2" ]; then
+            echo "-----------------------------------------------------"; PS3="Pilih versi PHP (pisahkan dengan spasi): "; select v in "${AVAILABLE_VERSIONS[@]}"; do if [ -n "$REPLY" ]; then for choice in $REPLY; do PHP_VERSIONS_TO_INSTALL+=("${AVAILABLE_VERSIONS[$choice-1]}"); done; break; else echo "Pilihan tidak valid."; fi; done < /dev/tty
+        else
+             PHP_VERSIONS_TO_INSTALL=("${PHP_VERSIONS_DEFAULT[@]}")
+        fi
+        if [ ${#PHP_VERSIONS_TO_INSTALL[@]} -eq 0 ]; then print_error "Tidak ada PHP dipilih."; exit 1; fi
+        if [ "$INSTALL_MODE" = "2" ]; then
+            print_info "Mode Manual: Masukkan detail kredensial."
+            read -p "Pass root MariaDB [Enter=acak]: " MARIADB_ROOT_PASS < /dev/tty
+            read -p "User phpMyAdmin [Enter=pma_user]: " PMA_USER < /dev/tty
+            read -p "Pass user phpMyAdmin [Enter=acak]: " PMA_PASS < /dev/tty
+            read -p "User File Manager [Enter=fm_admin]: " TFM_USER < /dev/tty
+            read -sp "Pass File Manager [Enter=acak]: " TFM_PASS < /dev/tty; echo ""
+        fi
+        MARIADB_ROOT_PASS=${MARIADB_ROOT_PASS:-$(generate_random_string)}; PMA_USER=${PMA_USER:-pma_user}; PMA_PASS=${PMA_PASS:-$(generate_random_string)}
+        TFM_USER=${TFM_USER:-fm_admin}; TFM_PASS=${TFM_PASS:-$(generate_random_string)}
     fi
-    if [ ${#PHP_VERSIONS_TO_INSTALL[@]} -eq 0 ]; then print_error "Tidak ada PHP dipilih."; exit 1; fi
     print_info "Versi PHP yang akan diinstal: ${PHP_VERSIONS_TO_INSTALL[*]}"
-    if [ "$INSTALL_MODE" = "2" ]; then
-        print_info "Mode Manual: Masukkan detail kredensial."
-        read -p "Pass root MariaDB [Enter=acak]: " MARIADB_ROOT_PASS < /dev/tty
-        read -p "User phpMyAdmin [Enter=pma_user]: " PMA_USER < /dev/tty
-        read -p "Pass user phpMyAdmin [Enter=acak]: " PMA_PASS < /dev/tty
-        read -p "User File Manager [Enter=fm_admin]: " TFM_USER < /dev/tty
-        read -sp "Pass File Manager [Enter=acak]: " TFM_PASS < /dev/tty; echo ""
-    fi
-    MARIADB_ROOT_PASS=${MARIADB_ROOT_PASS:-$(generate_random_string)}; PMA_USER=${PMA_USER:-pma_user}; PMA_PASS=${PMA_PASS:-$(generate_random_string)}
-    TFM_USER=${TFM_USER:-fm_admin}; TFM_PASS=${TFM_PASS:-$(generate_random_string)}
 }
+
 phase1_setup_stack() {
     print_info "FASE 1: Instalasi Dasar..."; apt-get update && apt-get upgrade -y
     install_packages apache2 mariadb-server mariadb-client curl wget bc
@@ -87,6 +99,7 @@ phase1_setup_stack() {
     print_info "Membuat user phpMyAdmin..."; mysql -u root -p"$MARIADB_ROOT_PASS" -e "CREATE USER '$PMA_USER'@'localhost' IDENTIFIED BY '$PMA_PASS';"
     mysql -u root -p"$MARIADB_ROOT_PASS" -e "GRANT ALL PRIVILEGES ON *.* TO '$PMA_USER'@'localhost' WITH GRANT OPTION;"; mysql -u root -p"$MARIADB_ROOT_PASS" -e "FLUSH PRIVILEGES;"
 }
+
 phase2_install_multi_php() {
     print_info "FASE 2: Instalasi PHP..."; add_php_repository
     for version in "${PHP_VERSIONS_TO_INSTALL[@]}"; do
@@ -99,16 +112,38 @@ phase2_install_multi_php() {
     echo "phpmyadmin phpmyadmin/dbconfig-install boolean true" | debconf-set-selections
     install_packages phpmyadmin
 }
+
 phase3_configure_apache() {
-    print_info "FASE 3: Konfigurasi Apache..."; a2enmod proxy proxy_http proxy_fcgi setenvif actions rewrite || true
-    a2enconf phpmyadmin || true; touch /etc/apache2/conf-available/php-per-project.conf; a2enconf php-per-project.conf || true
+    print_info "FASE 3: Konfigurasi Apache..."
+    a2enmod proxy proxy_http proxy_fcgi setenvif actions rewrite || true
+    a2enconf phpmyadmin || true
+    
+    local sorted_versions
+    IFS=$'\n' read -d '' -r -a sorted_versions < <(printf "%s\n" "${PHP_VERSIONS_TO_INSTALL[@]}" | sort -Vr)
+    local default_php_version=${sorted_versions[0]}
+    local default_socket_path="/run/php/php${default_php_version}-fpm.sock"
+
+    print_info "Mengatur PHP v${default_php_version} sebagai default untuk Dashboard di ${WEB_ROOT}..."
+    cat <<EOF > /etc/apache2/conf-available/php-per-project.conf
+# Konfigurasi Default untuk Web Root (Dashboard)
+# Otomatis diatur untuk menggunakan versi PHP terbaru yang diinstal: v${default_php_version}
+<Directory ${WEB_ROOT}>
+    Require all granted
+    <FilesMatch \.php$>
+        SetHandler "proxy:unix:${default_socket_path}|fcgi://localhost/"
+    </FilesMatch>
+</Directory>
+EOF
+    a2enconf php-per-project.conf || true
 }
+
 phase4_install_tools() {
     print_info "FASE 4: Memasang Alat Bantu..."
-    mkdir -p ${WEB_ROOT}
-    cp /home/vagrant/set_php_version.sh /usr/local/bin/set_php_version.sh 2>/dev/null || cp ./set_php_version.sh /usr/local/bin/set_php_version.sh
+    rm -f ${WEB_ROOT}/index.html
+    if [ -f /vagrant/set_php_version.sh ]; then cp /vagrant/set_php_version.sh /usr/local/bin/set_php_version.sh; else cp ./set_php_version.sh /usr/local/bin/set_php_version.sh; fi
     chmod +x /usr/local/bin/set_php_version.sh
     echo "www-data ALL=(ALL) NOPASSWD: /usr/local/bin/set_php_version.sh" > /etc/sudoers.d/www-data-php-manager
+    
     cd ${WEB_ROOT}
     wget -qO tinyfilemanager.php https://raw.githubusercontent.com/prasathmani/tinyfilemanager/master/tinyfilemanager.php
     mkdir -p file-manager; mv tinyfilemanager.php file-manager/index.php
@@ -117,33 +152,22 @@ phase4_install_tools() {
     sed -i "s#'admin' => '\$2y\$10\$KVMiF8xX25eQOXYN225m9uC4S3A9H2x2B.aQ.Y3oZ4a.aQ.Y3oZ4a'#'${TFM_USER}' => '${TFM_PASS_HASH}'#g" "${WEB_ROOT}/file-manager/index.php"
     sed -i "/'user'\s*=>/d" "${WEB_ROOT}/file-manager/index.php"; sed -i "s#\$root_path = \$_SERVER\['DOCUMENT_ROOT'\];#\$root_path = '${WEB_ROOT}';#g" "${WEB_ROOT}/file-manager/index.php"
     
-    # DIPERBAIKI: Menanamkan kode index.php langsung ke dalam skrip
     print_info "Membuat file dashboard utama 'index.php'..."
     cat <<'EOF' > ${WEB_ROOT}/index.php
 <?php
-// (Seluruh kode PHP dari file index.php Anda akan ditempel di sini)
-// Saya akan menggunakan versi terakhir yang kita sepakati
-// =================================================================
 // PHP Version Manager & Real-time Server Monitoring Dashboard
-// =================================================================
-// ... (dan seterusnya)
-// =================================================================
-// BAGIAN 1: FUNGSI-FUNGSI PHP
-// -- FUNGSI UNTUK MANAJEMEN PROYEK --
 define('WEB_ROOT', '/var/www/html'); 
 define('STATE_FILE', __DIR__ . '/config/project_versions.json');
 define('EXCLUDED_ITEMS', ['.', '..', 'index.php', 'config', 'assets', 'phpMyAdmin', 'file-manager']);
 function get_projects() { $all_items = scandir(WEB_ROOT); $projects = []; foreach ($all_items as $item) { if (!in_array($item, EXCLUDED_ITEMS) && is_dir(WEB_ROOT . '/' . $item)) { $projects[] = $item; } } return $projects; }
-function get_installed_php_versions() { $sockets = glob('/run/php/php*-fpm.sock'); $versions = []; foreach ($sockets as $socket) { if (preg_match('/php(\d+\.\d+)-fpm\.sock$/', $socket, $matches)) { $versions[] = $matches[1]; } } sort($versions); return $versions; }
+function get_installed_php_versions() { $sockets = glob('/run/php/php*-fpm.sock'); $versions = []; foreach ($sockets as $socket) { if (preg_match('/php(\d+\.\d+)-fpm\.sock$/', $socket, $matches)) { $versions[] = $matches[1]; } } rsort($versions, SORT_NUMERIC); return $versions; }
 function get_project_states() { if (!file_exists(STATE_FILE)) return []; $json_data = file_get_contents(STATE_FILE); return json_decode($json_data, true) ?: []; }
 function save_project_state($project, $version) { $states = get_project_states(); $states[$project] = $version; file_put_contents(STATE_FILE, json_encode($states, JSON_PRETTY_PRINT)); }
-// -- FUNGSI UNTUK MONITORING SERVER --
 function getCpuCores() { if (PHP_OS_FAMILY === 'Windows') { $cores = getenv('NUMBER_OF_PROCESSORS'); return $cores ? intval($cores) : 1; } else { if (is_readable('/proc/cpuinfo')) { $cpuinfo = file_get_contents('/proc/cpuinfo'); preg_match_all('/^processor\s*:\s*\d+/m', $cpuinfo, $matches); return count($matches[0]) > 0 ? count($matches[0]) : 1; } } return 1; }
 function getCpuInfo() { if (!function_exists('sys_getloadavg')) return false; $load = sys_getloadavg(); $cores = getCpuCores(); $percent = round(($load[0] / $cores) * 100); $percent_display = min($percent, 100); return ['load' => $load[0], 'cores' => $cores, 'percent' => $percent_display]; }
 function formatBytes($bytes, $precision = 2) { if ($bytes === false || !is_numeric($bytes)) return "N/A"; $units = ['B', 'KB', 'MB', 'GB', 'TB']; $bytes = max($bytes, 0); $pow = floor(($bytes ? log($bytes) : 0) / log(1024)); $pow = min($pow, count($units) - 1); $bytes /= (1 << (10 * $pow)); return round($bytes, $precision) . ' ' . $units[$pow]; }
 function getMemoryUsage() { $meminfo_path = '/proc/meminfo'; if (!is_readable($meminfo_path)) return false; $meminfo = file_get_contents($meminfo_path); preg_match('/MemTotal:\s+(\d+)/', $meminfo, $total); preg_match('/MemAvailable:\s+(\d+)/', $meminfo, $available); if (!isset($total[1]) || !isset($available[1])) return false; $total_mem_kb = $total[1]; $available_mem_kb = $available[1]; $used_mem_kb = $total_mem_kb - $available_mem_kb; $percent_used = ($total_mem_kb > 0) ? ($used_mem_kb / $total_mem_kb) * 100 : 0; return ['total' => $total_mem_kb * 1024, 'used' => $used_mem_kb * 1024, 'percent' => round($percent_used)]; }
 function getStorageUsage() { $path = '/'; $total_space = @disk_total_space($path); $free_space = @disk_free_space($path); if ($total_space === false || $free_space === false) return false; $used_space = $total_space - $free_space; $percent_used = ($total_space > 0) ? ($used_space / $total_space) * 100 : 0; return ['total' => $total_space, 'used' => $used_space, 'percent' => round($percent_used)]; }
-// BAGIAN 2: LOGIKA & ENDPOINT
 if (isset($_GET['json']) && $_GET['json'] == 'true') { header('Content-Type: application/json'); echo json_encode(['cpu' => getCpuInfo(), 'ram' => getMemoryUsage(), 'storage' => getStorageUsage()]); exit; }
 $message = ''; $message_type = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['project']) && isset($_POST['php_version'])) { $project_to_set = escapeshellarg(trim($_POST['project'])); $version_to_set = escapeshellarg(trim($_POST['php_version'])); $command = "sudo /usr/local/bin/set_php_version.sh {$project_to_set} {$version_to_set} 2>&1"; $output = shell_exec($command); if (strpos(strtolower($output), 'error') === false) { save_project_state(trim($_POST['project']), trim($_POST['php_version'])); $message = "Sukses! $output"; $message_type = 'success'; } else { $message = "Error! $output"; $message_type = 'error'; } }
