@@ -39,6 +39,22 @@ wget -qO- https://raw.githubusercontent.com/DanDhany/LAMP-stack-debian/main/inst
 ```
 Setelah dijalankan, skrip akan meminta input seperti username dan password. Jika sudah selesai, dashboard siap digunakan.
 
+### ⚙️ Pasca-Instalasi: Mengubah Konfigurasi
+
+Setelah instalasi selesai, Anda dapat mengubah kredensial atau port yang telah diatur dengan menjalankan skrip editor.
+
+1.  **Unduh skrip editor ke server Anda:**
+    ```bash
+    curl -fsSLO [https://raw.githubusercontent.com/NAMA_USER_ANDA/NAMA_REPO_ANDA/main/edit_config.sh](https://raw.githubusercontent.com/NAMA_USER_ANDA/NAMA_REPO_ANDA/main/edit_config.sh)
+    chmod +x edit_config.sh
+    ```
+2.  **Jalankan dengan sudo:**
+    ```bash
+    sudo ./edit_config.sh
+    ```
+    Skrip akan menampilkan menu untuk mengubah password MariaDB, kredensial File Manager, dan lainnya.
+
+
 🗑️ Uninstall
 ⚠️ Peringatan: Proses ini akan menghapus Apache, MariaDB, PHP, dan seluruh konfigurasi serta data terkait. Lakukan backup sebelum melanjutkan.
 
