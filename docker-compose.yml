@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  dashboard-test-env:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: debian-dashboard-test:latest
+    container_name: dashboard-test-container
+
+    # ... konfigurasi lain seperti ports ...
+    ports:
+      - "8080:80"
+
+    # INI KUNCINYA: Tambahkan baris ini untuk mengaktifkan mode privileged
+    privileged: true
+
+    stdin_open: true
+    tty: true

@@ -1,20 +1,17 @@
 #!/bin/bash
 
 # ==============================================================================
-#   Skrip Uninstall Total untuk Dashboard Server & Multi-PHP Manager
+#   Skrip Uninstall Total untuk Dashboard Server & Multi-PHP Manager (Versi Rapi)
 # ==============================================================================
 
-# Keluar segera jika ada perintah yang gagal
 set -e
-
-# -- VARIABEL --
-PHP_VERSIONS_TO_PURGE=("7.4" "8.2")
 
 # -- FUNGSI --
 print_info() { echo -e "\n\e[34m🔵 INFO: $1\e[0m"; }
 print_success() { echo -e "\e[32m✅ SUKSES: $1\e[0m"; }
 print_error() { echo -e "\e[31m❌ ERROR: $1\e[0m"; }
 
+# -- FUNGSI UTAMA --
 confirm_uninstall() {
     clear
     echo "======================================================================"
@@ -39,8 +36,14 @@ confirm_uninstall() {
 
 stop_and_disable_services() {
     print_info "Menghentikan dan menonaktifkan semua service terkait..."
-    systemctl stop apache2 mariadb shellinabox || true
-    systemctl disable apache2 mariadb shellinabox || true
+    if [ -d /run/systemd/system ]; then
+        systemctl stop apache2 mariadb shellinabox || true
+        systemctl disable apache2 mariadb shellinabox || true
+    else
+        service apache2 stop || true
+        service mariadb stop || true
+        service shellinabox stop || true
+    fi
 }
 
 purge_packages() {
@@ -48,22 +51,15 @@ purge_packages() {
     apt-get purge --auto-remove -y apache2* mariadb-* phpmyadmin shellinabox
     
     print_info "Menghapus semua paket PHP dari PPA..."
-    for version in "${PHP_VERSIONS_TO_PURGE[@]}"; do
-        apt-get purge --auto-remove -y "php${version}*"
-    done
-}
-
-remove_ppa() {
-    print_info "Menghapus PPA Ondřej Surý..."
-    if command -v add-apt-repository &> /dev/null; then
-        add-apt-repository --remove ppa:ondrej/php -y
-    else
-        rm -f /etc/apt/sources.list.d/ondrej-ubuntu-php-*.list
-    fi
+    apt-get purge --auto-remove -y "php*" || true
 }
 
 remove_manual_files() {
-    print_info "Menghapus file dan direktori yang dibuat secara manual..."
+    print_info "Menghapus file PPA dan GPG Key yang dibuat secara manual..."
+    rm -f /etc/apt/sources.list.d/ondrej-php.list
+    rm -f /usr/share/keyrings/ondrej-php.gpg
+
+    print_info "Menghapus file dan direktori kustom lainnya..."
     rm -f /usr/local/bin/set_php_version.sh
     rm -f /etc/sudoers.d/www-data-php-manager
     rm -f /etc/apache2/conf-available/php-per-project.conf
@@ -92,7 +88,6 @@ main() {
     confirm_uninstall
     stop_and_disable_services
     purge_packages
-    remove_ppa
     remove_manual_files
     final_cleanup
     
