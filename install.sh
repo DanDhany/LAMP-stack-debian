@@ -5,10 +5,15 @@
 # ==============================================================================
 #   Menggabungkan semua fitur: Mode Ganda (Interaktif/Non-Interaktif),
 #   Deteksi systemd, Rollback, PHP Default Otomatis, dan semua alat bantu.
+#
+#   VERSI PERBAIKAN:
+#   - FIX: Koneksi phpMyAdmin dengan mengkonfigurasi handler PHP-FPM secara eksplisit.
+#   - FIX: Tautan ke phpMyAdmin di index.php diubah menjadi huruf kecil.
+#   - FIX: Metode penulisan kredensial Tiny File Manager dibuat lebih andal.
 # ==============================================================================
 
 # Keluar segera jika ada perintah yang gagal
-set -x
+set -e
 
 # -- VARIABEL GLOBAL --
 export DEBIAN_FRONTEND=noninteractive
@@ -36,7 +41,7 @@ silent_cleanup() {
     apt-get purge --auto-remove -y apache2* mariadb-* phpmyadmin "php*" || true
     rm -f /etc/apt/sources.list.d/php.list; rm -f /usr/share/keyrings/deb.sury.org-php.gpg
     rm -f /usr/local/bin/set_php_version.sh; rm -f /etc/sudoers.d/www-data-php-manager
-    rm -f /etc/apache2/conf-available/php-per-project.conf; rm -rf /var/www/html/*; rm -rf /var/lib/mysql
+    rm -f /etc/apache2/conf-available/php-per-project.conf; rm -f /etc/apache2/conf-available/phpmyadmin-handler.conf; rm -rf /var/www/html/*; rm -rf /var/lib/mysql
     apt-get autoremove -y; print_success "Pembersihan selesai."
 }
 cleanup_on_error() { print_error "Instalasi gagal."; silent_cleanup; print_error "Rollback Selesai."; exit 1; }
@@ -110,13 +115,15 @@ phase2_install_multi_php() {
     done
     print_info "Menginstal phpMyAdmin..."; echo "phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2" | debconf-set-selections
     echo "phpmyadmin phpmyadmin/dbconfig-install boolean true" | debconf-set-selections
+    # Beritahu phpmyadmin password root agar bisa membuat database dan user internalnya sendiri
+    echo "phpmyadmin phpmyadmin/mysql/admin-pass password $MARIADB_ROOT_PASS" | debconf-set-selections
     install_packages phpmyadmin
 }
 
 phase3_configure_apache() {
     print_info "FASE 3: Konfigurasi Apache..."
     a2enmod proxy proxy_http proxy_fcgi setenvif actions rewrite || true
-    a2enconf phpmyadmin || true
+    a2enconf phpmyadmin || true # Mengaktifkan alias /phpmyadmin
     
     local sorted_versions
     IFS=$'\n' read -d '' -r -a sorted_versions < <(printf "%s\n" "${PHP_VERSIONS_TO_INSTALL[@]}" | sort -Vr)
@@ -135,7 +142,21 @@ phase3_configure_apache() {
 </Directory>
 EOF
     a2enconf php-per-project.conf || true
+
+    # PERBAIKAN: Tambahkan handler PHP-FPM untuk phpMyAdmin secara eksplisit
+    print_info "Memastikan phpMyAdmin menggunakan PHP-FPM v${default_php_version}..."
+    cat <<EOF > /etc/apache2/conf-available/phpmyadmin-handler.conf
+# Atur handler PHP-FPM untuk alias phpMyAdmin
+# Ini memastikan phpMyAdmin menggunakan PHP yang benar, bukan modul Apache default
+<Directory /usr/share/phpmyadmin>
+    <FilesMatch \.php$>
+        SetHandler "proxy:unix:${default_socket_path}|fcgi://localhost/"
+    </FilesMatch>
+</Directory>
+EOF
+    a2enconf phpmyadmin-handler.conf || true
 }
+
 
 phase4_install_tools() {
     print_info "FASE 4: Memasang Alat Bantu..."
@@ -147,18 +168,33 @@ phase4_install_tools() {
     cd ${WEB_ROOT}
     wget -qO tinyfilemanager.php https://raw.githubusercontent.com/prasathmani/tinyfilemanager/master/tinyfilemanager.php
     mkdir -p file-manager; mv tinyfilemanager.php file-manager/index.php
-    TFM_PASS_HASH=$(php -r "echo password_hash('$TFM_PASS', PASSWORD_DEFAULT);")
-    sed -i "s#^// \$auth_users = array(#\$auth_users = array(#g" "${WEB_ROOT}/file-manager/index.php"
-    sed -i "s#'admin' => '\$2y\$10\$KVMiF8xX25eQOXYN225m9uC4S3A9H2x2B.aQ.Y3oZ4a.aQ.Y3oZ4a'#'${TFM_USER}' => '${TFM_PASS_HASH}'#g" "${WEB_ROOT}/file-manager/index.php"
-    sed -i "/'user'\s*=>/d" "${WEB_ROOT}/file-manager/index.php"; sed -i "s#\$root_path = \$_SERVER\['DOCUMENT_ROOT'\];#\$root_path = '${WEB_ROOT}';#g" "${WEB_ROOT}/file-manager/index.php"
     
+    # PERBAIKAN: Metode yang lebih andal untuk mengatur kredensial Tiny File Manager
+    print_info "Mengatur kredensial Tiny File Manager..."
+    local TFM_TARGET_FILE="${WEB_ROOT}/file-manager/index.php"
+    local TFM_PASS_HASH=$(php -r "echo password_hash('$TFM_PASS', PASSWORD_DEFAULT);")
+    
+    # 1. Aktifkan blok otentikasi
+    sed -i "s#^// \$auth_users = array(#\$auth_users = array(#g" "$TFM_TARGET_FILE"
+    
+    # 2. Hapus user default ('admin' dan 'user')
+    sed -i "/'admin'\s*=>/d" "$TFM_TARGET_FILE"
+    sed -i "/'user'\s*=>/d" "$TFM_TARGET_FILE"
+
+    # 3. Tambahkan user baru setelah baris '$auth_users = array('
+    sed -i "/^\$auth_users = array(/a \    '${TFM_USER}' => '${TFM_PASS_HASH}'," "$TFM_TARGET_FILE"
+    
+    # 4. Atur root path
+    sed -i "s#\$root_path = \$_SERVER\['DOCUMENT_ROOT'\];#\$root_path = '${WEB_ROOT}';#g" "$TFM_TARGET_FILE"
+
     print_info "Membuat file dashboard utama 'index.php'..."
+    # PERBAIKAN: Mengubah tautan phpMyAdmin menjadi huruf kecil
     cat <<'EOF' > ${WEB_ROOT}/index.php
 <?php
 // PHP Version Manager & Real-time Server Monitoring Dashboard
 define('WEB_ROOT', '/var/www/html'); 
 define('STATE_FILE', __DIR__ . '/config/project_versions.json');
-define('EXCLUDED_ITEMS', ['.', '..', 'index.php', 'config', 'assets', 'phpMyAdmin', 'file-manager']);
+define('EXCLUDED_ITEMS', ['.', '..', 'index.php', 'config', 'assets', 'phpmyadmin', 'file-manager']);
 function get_projects() { $all_items = scandir(WEB_ROOT); $projects = []; foreach ($all_items as $item) { if (!in_array($item, EXCLUDED_ITEMS) && is_dir(WEB_ROOT . '/' . $item)) { $projects[] = $item; } } return $projects; }
 function get_installed_php_versions() { $sockets = glob('/run/php/php*-fpm.sock'); $versions = []; foreach ($sockets as $socket) { if (preg_match('/php(\d+\.\d+)-fpm\.sock$/', $socket, $matches)) { $versions[] = $matches[1]; } } rsort($versions, SORT_NUMERIC); return $versions; }
 function get_project_states() { if (!file_exists(STATE_FILE)) return []; $json_data = file_get_contents(STATE_FILE); return json_decode($json_data, true) ?: []; }
@@ -173,41 +209,43 @@ $message = ''; $message_type = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['project']) && isset($_POST['php_version'])) { $project_to_set = escapeshellarg(trim($_POST['project'])); $version_to_set = escapeshellarg(trim($_POST['php_version'])); $command = "sudo /usr/local/bin/set_php_version.sh {$project_to_set} {$version_to_set} 2>&1"; $output = shell_exec($command); if (strpos(strtolower($output), 'error') === false) { save_project_state(trim($_POST['project']), trim($_POST['php_version'])); $message = "Sukses! $output"; $message_type = 'success'; } else { $message = "Error! $output"; $message_type = 'error'; } }
 $projects = get_projects(); $php_versions = get_installed_php_versions(); $project_states = get_project_states(); $cpu_info = getCpuInfo(); $memory_usage = getMemoryUsage(); $storage_usage = getStorageUsage();
 ?>
-<!DOCTYPE html><html lang="id"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Server & Project Dashboard</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gray-100 text-gray-800 font-sans"><header class="bg-white shadow-md sticky top-0 z-10"><div class="container mx-auto px-6 py-4 flex justify-between items-center"><h1 class="text-2xl font-bold text-gray-800">Server Dashboard</h1><nav class="space-x-4"><a href="/file-manager/" target="_blank" class="text-indigo-600 hover:text-indigo-800 font-semibold">File Manager</a><a href="/phpMyAdmin" target="_blank" class="text-indigo-600 hover:text-indigo-800 font-semibold">phpMyAdmin</a></nav></div></header><main class="container mx-auto px-6 py-8"><section id="resource-stats" class="mb-10"><h2 class="text-2xl font-bold text-center text-gray-700 mb-6">Status Sumber Daya Server</h2><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"><div class="bg-white rounded-lg shadow p-5 flex flex-col"><h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center"><svg class="h-6 w-6 text-indigo-500 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V8.25a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 8.25v7.5A2.25 2.25 0 006.75 18z" /></svg>CPU</h3><?php if ($cpu_info): ?><div class="w-full bg-gray-200 rounded-full h-6"><div id="cpu-bar" class="bg-indigo-500 h-6 text-xs font-medium text-indigo-100 text-center p-1 leading-none rounded-full" style="width: <?php echo $cpu_info['percent']; ?>%"><?php echo $cpu_info['percent']; ?>%</div></div><div class="flex justify-between text-sm text-gray-500 mt-2"><span id="cpu-text">Load: <?php echo $cpu_info['load']; ?></span><span>Cores: <?php echo $cpu_info['cores']; ?></span></div><?php else: ?><p class="text-red-500 font-semibold">Tidak Didukung.</p><?php endif; ?></div><div class="bg-white rounded-lg shadow p-5 flex flex-col"><h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center"><svg class="h-6 w-6 text-green-500 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 7.5V6.108c0-1.135.845-2.098 1.976-2.192.373-.03.748-.03 1.125 0 1.131.094 1.976 1.057 1.976 2.192V7.5M8.25 7.5h7.5M8.25 7.5V9a.75.75 0 01-.75.75H5.25A.75.75 0 014.5 9V7.5m8.25 0V9a.75.75 0 00.75.75h2.25a.75.75 0 00.75-.75V7.5M12 10.5h.008v.008H12v-.008zM12 15h.008v.008H12v-.008zm0 2.25h.008v.008H12v-.008zM9.75 15h.008v.008H9.75v-.008zm0 2.25h.008v.008H9.75v-.008zM7.5 15h.008v.008H7.5v-.008zm0 2.25h.008v.008H7.5v-.008zm6.75-4.5h.008v.008h-.008v-.008zm0 2.25h.008v.008h-.008v-.008z" /></svg>RAM</h3><?php if ($memory_usage): ?><div class="w-full bg-gray-200 rounded-full h-6"><div id="ram-bar" class="bg-green-500 h-6 text-xs font-medium text-green-100 text-center p-1 leading-none rounded-full" style="width: <?php echo $memory_usage['percent']; ?>%"><?php echo $memory_usage['percent']; ?>%</div></div><div class="flex justify-between text-sm text-gray-500 mt-2"><span id="ram-text">Digunakan: <?php echo formatBytes($memory_usage['used']); ?></span><span>Total: <?php echo formatBytes($memory_usage['total']); ?></span></div><?php else: ?><p class="text-red-500 font-semibold">Tidak Didukung.</p><?php endif; ?></div><div class="bg-white rounded-lg shadow p-5 flex flex-col"><h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center"><svg class="h-6 w-6 text-sky-500 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" /></svg>Penyimpanan</h3><?php if ($storage_usage): ?><div class="w-full bg-gray-200 rounded-full h-6"><div id="storage-bar" class="bg-sky-500 h-6 text-xs font-medium text-sky-100 text-center p-1 leading-none rounded-full" style="width: <?php echo $storage_usage['percent']; ?>%"><?php echo $storage_usage['percent']; ?>%</div></div><div class="flex justify-between text-sm text-gray-500 mt-2"><span id="storage-text">Digunakan: <?php echo formatBytes($storage_usage['used']); ?></span><span>Total: <?php echo formatBytes($storage_usage['total']); ?></span></div><?php else: ?><p class="text-red-500 font-semibold">Gagal membaca info disk.</p><?php endif; ?></div></div></section><hr class="my-10 border-gray-200"><section id="project-management"><?php if ($message): ?><div class="mb-6 p-4 rounded-md <?php echo $message_type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'; ?>"><?php echo htmlspecialchars($message); ?></div><?php endif; ?><div class="bg-white rounded-lg shadow-lg"><div class="p-6 border-b border-gray-200"><h2 class="text-xl font-semibold">Manajemen Proyek</h2><p class="text-gray-600 mt-1">Atur versi PHP untuk setiap proyek.</p></div><div class="overflow-x-auto"><table class="min-w-full text-left"><thead class="bg-gray-50 border-b border-gray-200"><tr><th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Nama Proyek</th><th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Versi PHP</th><th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Aksi</th></tr></thead><tbody class="divide-y divide-gray-200">
-            <?php if (empty($projects)): ?><tr><td colspan="3" class="px-6 py-12 text-center text-gray-500"><p>Belum ada proyek.</p><p class="text-sm">Buat folder baru di `<?php echo WEB_ROOT; ?>`.</p></td></tr><?php else: ?>
-            <?php foreach ($projects as $project): ?><?php $current_version = $project_states[$project] ?? 'Default'; ?><tr class="hover:bg-gray-50"><td class="px-6 py-4 whitespace-nowrap"><div class="flex items-center"><svg class="h-6 w-6 text-yellow-500 mr-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" /></svg><a href="/<?php echo htmlspecialchars($project); ?>" target="_blank" class="font-medium text-indigo-600 hover:text-indigo-900"><?php echo htmlspecialchars($project); ?></a></div></td><td class="px-6 py-4 whitespace-nowrap"><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full <?php echo $current_version !== 'Default' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'; ?>"><?php echo htmlspecialchars($current_version); ?></span></td><td class="px-6 py-4 whitespace-nowrap text-sm font-medium"><form method="POST" action="index.php" class="flex items-center gap-2"><input type="hidden" name="project" value="<?php echo htmlspecialchars($project); ?>"><select name="php_version" class="block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"><?php foreach ($php_versions as $version): ?><option value="<?php echo $version; ?>" <?php echo ($project_states[$project] ?? '') === $version ? 'selected' : ''; ?>>PHP <?php echo $version; ?></option><?php endforeach; ?></select><button type="submit" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Simpan</button></form></td></tr><?php endforeach; ?><?php endif; ?>
-            </tbody></table></div></div></section></main><footer class="text-center text-gray-500 text-sm py-6 mt-4"><p>Dashboard &copy; <?php echo date("Y"); ?></p></footer><script>
-            function formatBytesJS(bytes, decimals = 2) {if (!+bytes) return '0 B';const k = 1024;const dm = decimals < 0 ? 0 : decimals;const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];const i = Math.floor(Math.log(bytes) / Math.log(k));return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;}
-            async function updateStats() {
-                try {
-                    const response = await fetch('index.php?json=true', { cache: "no-store" });
-                    if (!response.ok) return;
-                    const data = await response.json();
-                    if (data.cpu) {const el = document.getElementById('cpu-bar');if (el) { el.style.width = data.cpu.percent + '%'; el.textContent = data.cpu.percent + '%'; }const txt = document.getElementById('cpu-text');if (txt) txt.textContent = 'Load: ' + data.cpu.load;}
-                    if (data.ram) {const el = document.getElementById('ram-bar');if (el) { el.style.width = data.ram.percent + '%'; el.textContent = data.ram.percent + '%'; }const txt = document.getElementById('ram-text');if (txt) txt.textContent = 'Digunakan: ' + formatBytesJS(data.ram.used);}
-                    if (data.storage) {const el = document.getElementById('storage-bar');if (el) { el.style.width = data.storage.percent + '%'; el.textContent = data.storage.percent + '%'; }const txt = document.getElementById('storage-text');if (txt) txt.textContent = 'Digunakan: ' + formatBytesJS(data.storage.used);}
-                } catch (error) {console.error('Gagal memperbarui status:', error);}
-            }
-            setInterval(updateStats, 2000);
-        </script></body></html>
+<!DOCTYPE html><html lang="id"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Server & Project Dashboard</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gray-100 text-gray-800 font-sans"><header class="bg-white shadow-md sticky top-0 z-10"><div class="container mx-auto px-6 py-4 flex justify-between items-center"><h1 class="text-2xl font-bold text-gray-800">Server Dashboard</h1><nav class="space-x-4"><a href="/file-manager/" target="_blank" class="text-indigo-600 hover:text-indigo-800 font-semibold">File Manager</a><a href="/phpmyadmin" target="_blank" class="text-indigo-600 hover:text-indigo-800 font-semibold">phpMyAdmin</a></nav></div></header><main class="container mx-auto px-6 py-8"><section id="resource-stats" class="mb-10"><h2 class="text-2xl font-bold text-center text-gray-700 mb-6">Status Sumber Daya Server</h2><div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"><div class="bg-white rounded-lg shadow p-5 flex flex-col"><h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center"><svg class="h-6 w-6 text-indigo-500 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 3v1.5M4.5 8.25H3m18 0h-1.5M4.5 12H3m18 0h-1.5m-15 3.75H3m18 0h-1.5M8.25 19.5V21M12 3v1.5m0 15V21m3.75-18v1.5m0 15V21m-9-1.5h10.5a2.25 2.25 0 002.25-2.25V8.25a2.25 2.25 0 00-2.25-2.25H6.75A2.25 2.25 0 004.5 8.25v7.5A2.25 2.25 0 006.75 18z" /></svg>CPU</h3><?php if ($cpu_info): ?><div class="w-full bg-gray-200 rounded-full h-6"><div id="cpu-bar" class="bg-indigo-500 h-6 text-xs font-medium text-indigo-100 text-center p-1 leading-none rounded-full" style="width: <?php echo $cpu_info['percent']; ?>%"><?php echo $cpu_info['percent']; ?>%</div></div><div class="flex justify-between text-sm text-gray-500 mt-2"><span id="cpu-text">Load: <?php echo $cpu_info['load']; ?></span><span>Cores: <?php echo $cpu_info['cores']; ?></span></div><?php else: ?><p class="text-red-500 font-semibold">Tidak Didukung.</p><?php endif; ?></div><div class="bg-white rounded-lg shadow p-5 flex flex-col"><h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center"><svg class="h-6 w-6 text-green-500 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.25 7.5V6.108c0-1.135.845-2.098 1.976-2.192.373-.03.748-.03 1.125 0 1.131.094 1.976 1.057 1.976 2.192V7.5M8.25 7.5h7.5M8.25 7.5V9a.75.75 0 01-.75.75H5.25A.75.75 0 014.5 9V7.5m8.25 0V9a.75.75 0 00.75.75h2.25a.75.75 0 00.75-.75V7.5M12 10.5h.008v.008H12v-.008zM12 15h.008v.008H12v-.008zm0 2.25h.008v.008H12v-.008zM9.75 15h.008v.008H9.75v-.008zm0 2.25h.008v.008H9.75v-.008zM7.5 15h.008v.008H7.5v-.008zm0 2.25h.008v.008H7.5v-.008zm6.75-4.5h.008v.008h-.008v-.008zm0 2.25h.008v.008h-.008v-.008z" /></svg>RAM</h3><?php if ($memory_usage): ?><div class="w-full bg-gray-200 rounded-full h-6"><div id="ram-bar" class="bg-green-500 h-6 text-xs font-medium text-green-100 text-center p-1 leading-none rounded-full" style="width: <?php echo $memory_usage['percent']; ?>%"><?php echo $memory_usage['percent']; ?>%</div></div><div class="flex justify-between text-sm text-gray-500 mt-2"><span id="ram-text">Digunakan: <?php echo formatBytes($memory_usage['used']); ?></span><span>Total: <?php echo formatBytes($memory_usage['total']); ?></span></div><?php else: ?><p class="text-red-500 font-semibold">Tidak Didukung.</p><?php endif; ?></div><div class="bg-white rounded-lg shadow p-5 flex flex-col"><h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center"><svg class="h-6 w-6 text-sky-500 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" /></svg>Penyimpanan</h3><?php if ($storage_usage): ?><div class="w-full bg-gray-200 rounded-full h-6"><div id="storage-bar" class="bg-sky-500 h-6 text-xs font-medium text-sky-100 text-center p-1 leading-none rounded-full" style="width: <?php echo $storage_usage['percent']; ?>%"><?php echo $storage_usage['percent']; ?>%</div></div><div class="flex justify-between text-sm text-gray-500 mt-2"><span id="storage-text">Digunakan: <?php echo formatBytes($storage_usage['used']); ?></span><span>Total: <?php echo formatBytes($storage_usage['total']); ?></span></div><?php else: ?><p class="text-red-500 font-semibold">Gagal membaca info disk.</p><?php endif; ?></div></div></section><hr class="my-10 border-gray-200"><section id="project-management"><?php if ($message): ?><div class="mb-6 p-4 rounded-md <?php echo $message_type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'; ?>"><?php echo htmlspecialchars($message); ?></div><?php endif; ?><div class="bg-white rounded-lg shadow-lg"><div class="p-6 border-b border-gray-200"><h2 class="text-xl font-semibold">Manajemen Proyek</h2><p class="text-gray-600 mt-1">Atur versi PHP untuk setiap proyek.</p></div><div class="overflow-x-auto"><table class="min-w-full text-left"><thead class="bg-gray-50 border-b border-gray-200"><tr><th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Nama Proyek</th><th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Versi PHP</th><th class="px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Aksi</th></tr></thead><tbody class="divide-y divide-gray-200">
+                <?php if (empty($projects)): ?><tr><td colspan="3" class="px-6 py-12 text-center text-gray-500"><p>Belum ada proyek.</p><p class="text-sm">Buat folder baru di `<?php echo WEB_ROOT; ?>`.</p></td></tr><?php else: ?>
+                <?php foreach ($projects as $project): ?><?php $current_version = $project_states[$project] ?? 'Default'; ?><tr class="hover:bg-gray-50"><td class="px-6 py-4 whitespace-nowrap"><div class="flex items-center"><svg class="h-6 w-6 text-yellow-500 mr-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" /></svg><a href="/<?php echo htmlspecialchars($project); ?>" target="_blank" class="font-medium text-indigo-600 hover:text-indigo-900"><?php echo htmlspecialchars($project); ?></a></div></td><td class="px-6 py-4 whitespace-nowrap"><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full <?php echo $current_version !== 'Default' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'; ?>"><?php echo htmlspecialchars($current_version); ?></span></td><td class="px-6 py-4 whitespace-nowrap text-sm font-medium"><form method="POST" action="index.php" class="flex items-center gap-2"><input type="hidden" name="project" value="<?php echo htmlspecialchars($project); ?>"><select name="php_version" class="block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"><?php foreach ($php_versions as $version): ?><option value="<?php echo $version; ?>" <?php echo ($project_states[$project] ?? '') === $version ? 'selected' : ''; ?>>PHP <?php echo $version; ?></option><?php endforeach; ?></select><button type="submit" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Simpan</button></form></td></tr><?php endforeach; ?><?php endif; ?>
+                </tbody></table></div></div></section></main><footer class="text-center text-gray-500 text-sm py-6 mt-4"><p>Dashboard &copy; <?php echo date("Y"); ?></p></footer><script>
+                    function formatBytesJS(bytes, decimals = 2) {if (!+bytes) return '0 B';const k = 1024;const dm = decimals < 0 ? 0 : decimals;const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];const i = Math.floor(Math.log(bytes) / Math.log(k));return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;}
+                    async function updateStats() {
+                        try {
+                            const response = await fetch('index.php?json=true', { cache: "no-store" });
+                            if (!response.ok) return;
+                            const data = await response.json();
+                            if (data.cpu) {const el = document.getElementById('cpu-bar');if (el) { el.style.width = data.cpu.percent + '%'; el.textContent = data.cpu.percent + '%'; }const txt = document.getElementById('cpu-text');if (txt) txt.textContent = 'Load: ' + data.cpu.load;}
+                            if (data.ram) {const el = document.getElementById('ram-bar');if (el) { el.style.width = data.ram.percent + '%'; el.textContent = data.ram.percent + '%'; }const txt = document.getElementById('ram-text');if (txt) txt.textContent = 'Digunakan: ' + formatBytesJS(data.ram.used);}
+                            if (data.storage) {const el = document.getElementById('storage-bar');if (el) { el.style.width = data.storage.percent + '%'; el.textContent = data.storage.percent + '%'; }const txt = document.getElementById('storage-text');if (txt) txt.textContent = 'Digunakan: ' + formatBytesJS(data.storage.used);}
+                        } catch (error) {console.error('Gagal memperbarui status:', error);}
+                    }
+                    setInterval(updateStats, 2000);
+                </script></body></html>
 EOF
 }
+
 phase5_finalize() {
     print_info "FASE 5: Finalisasi..."; mkdir -p ${WEB_ROOT}/config; touch ${WEB_ROOT}/config/project_versions.json
     chown -R www-data:www-data ${WEB_ROOT}; restart_service apache2
     apt-get autoremove -y
 }
+
 display_summary() {
     IP_ADDRESS=$(hostname -I | awk '{print $1}'); clear; print_success "INSTALASI SELESAI!"
     echo "======================================================================"; printf "\n"
     printf "  Dashboard: \e[1;36mhttp://%s/\e[0m\n\n" "${IP_ADDRESS}"
     printf "  Akses Alat Bantu:\n"; printf "+-----------------+------------------------------------------+\n"
-    printf "| \e[1;32m%s\e[0m           | \e[1;36m%s\e[0m                                  |\n" "ALAT" "DETAIL"
+    printf "| \e[1;32m%s\e[0m         | \e[1;36m%s\e[0m                                    |\n" "ALAT" "DETAIL"
     printf "+-----------------+------------------------------------------+\n"
-    printf "| File Manager    | URL: http://%s/file-manager/      |\n" "${IP_ADDRESS}"
+    printf "| File Manager    | URL: http://%s/file-manager/       |\n" "${IP_ADDRESS}"
     printf "|                 | User: %-36s |\n" "${TFM_USER}"; printf "|                 | Pass: %-36s |\n" "${TFM_PASS}"
     printf "+-----------------+------------------------------------------+\n"
-    printf "| phpMyAdmin      | URL: http://%s/phpMyAdmin       |\n" "${IP_ADDRESS}"
+    printf "| phpMyAdmin      | URL: http://%s/phpmyadmin          |\n" "${IP_ADDRESS}"
     printf "|                 | User: %-36s |\n" "${PMA_USER}"; printf "|                 | Pass: %-36s |\n" "${PMA_PASS}"
     printf "+-----------------+------------------------------------------+\n"
     printf "| DB Root         | User: root                               |\n"
@@ -216,6 +254,7 @@ display_summary() {
     print_warning "Catat semua kredensial ini dan simpan di tempat yang aman."
     echo "======================================================================"
 }
+
 main() {
     trap cleanup_on_error ERR; check_root
     if [ -f "$LOCK_FILE" ]; then
@@ -226,4 +265,5 @@ main() {
     touch "$LOCK_FILE"; get_setup_choices "$@"; phase1_setup_stack; phase2_install_multi_php; phase3_configure_apache
     phase4_install_tools; phase5_finalize; trap - ERR; rm -f "$LOCK_FILE"; display_summary
 }
+
 main "$@"
