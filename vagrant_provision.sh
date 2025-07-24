@@ -8,6 +8,7 @@
 # ==============================================================================
 
 # Pindah ke direktori /vagrant di mana semua file proyek berada
+# Pindah ke direktori /vagrant di mana semua file proyek berada
 cd /vagrant
 
 # Jalankan skrip instalasi utama, meneruskan semua argumen ($@)

@@ -1,0 +1,14 @@
+<VirtualHost *:80>
+    ServerAdmin webmaster@localhost
+    DocumentRoot ${WEB_ROOT}
+    DirectoryIndex index.php index.html index.htm
+    
+    # Available loglevels: trace8, ..., trace1, debug, info, notice, warn,
+    # error, crit, alert, emerg.
+    LogLevel warn
+    ErrorLog ${APACHE_LOG_DIR}/error.log
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+    
+    # Include PHP configuration
+    Include conf-available/php-dashboard.conf
+</VirtualHost>

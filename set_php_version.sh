@@ -44,7 +44,7 @@ fi
 PROJECT_NAME=$1
 PHP_VERSION=$2
 WEB_ROOT="/var/www/html"
-APACHE_CONFIG_FILE="/etc/apache2/conf-available/php-per-project.conf"
+APACHE_CONFIG_FILE="/etc/apache2/conf-available/php-dashboard.conf"
 PROJECT_PATH="${WEB_ROOT}/${PROJECT_NAME}"
 SOCKET_PATH="/run/php/php${PHP_VERSION}-fpm.sock"
 
@@ -65,7 +65,7 @@ ESCAPED_PROJECT_PATH=$(echo "$PROJECT_PATH" | sed 's/[\/&]/\\&/g')
 
 # Hapus konfigurasi lama untuk proyek ini dari file
 print_info_local "Menghapus konfigurasi lama untuk proyek '${PROJECT_NAME}' dari ${APACHE_CONFIG_FILE}..."
-sed -i "/<Directory \"${ESCAPED_PROJECT_PATH}\">/,/<\/Directory>/d" "${APACHE_CONFIG_FILE}"
+sed -i "/# Konfigurasi untuk Proyek: ${PROJECT_NAME}/,/<\/Directory>/d" "${APACHE_CONFIG_FILE}"
 
 # Tambahkan konfigurasi baru
 print_info_local "Menambahkan konfigurasi baru untuk proyek '${PROJECT_NAME}' (PHP ${PHP_VERSION})..."
@@ -74,11 +74,11 @@ CONFIG_BLOCK="
 <Directory \"${PROJECT_PATH}\">
     Require all granted
     <FilesMatch \.php$>
-        SetHandler \"proxy:unix:${SOCKET_PATH}|fcgi://localhost/\"
+        SetHandler \"proxy:unix:${SOCKET_PATH}|fcgi://localhost${PROJECT_PATH}\"
     </FilesMatch>
 </Directory>
 "
-echo "${CONFIG_BLOCK}" | tee -a "${APACHE_CONFIG_FILE}"
+echo "${CONFIG_BLOCK}" >> "${APACHE_CONFIG_FILE}"
 
 # Reload Apache
 print_info_local "Mereload konfigurasi Apache..."

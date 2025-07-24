@@ -1,0 +1,17 @@
+# Konfigurasi PHP untuk Dashboard Web Root
+# Menggunakan PHP v${default_php_version} dengan PHP-FPM
+<Directory "${WEB_ROOT}">
+    Require all granted
+    <FilesMatch \.php$>
+        SetHandler "proxy:unix:${default_socket_path}|fcgi://localhost/"
+    </FilesMatch>
+</Directory>
+
+# Konfigurasi khusus untuk phpMyAdmin
+Alias /phpmyadmin /usr/share/phpmyadmin
+<Directory /usr/share/phpmyadmin>
+    Require all granted
+    <FilesMatch \.php$>
+        SetHandler "proxy:unix:${default_socket_path}|fcgi://localhost/usr/share/phpmyadmin/"
+    </FilesMatch>
+</Directory>
